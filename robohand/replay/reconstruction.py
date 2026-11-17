@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 import json
 from pathlib import Path
 import threading
@@ -13,8 +14,15 @@ import numpy as np
 import pyrealsense2 as rs
 
 from ..cameras.d405 import LUT
-from ..paths import RECORDINGS
+from ..paths import ACTIVE_CALIBRATION, CALIBRATIONS, RECORDINGS
 from ..settings import read_settings
+
+SESSION_CALIBRATION = "calibration.json"   # snapshot written next to session.json at record start
+CALIBRATION_ORIGINS = {
+    "session": "녹화에 저장된 보정",
+    "inferred": "녹화 시작 직전에 만든 보정 (시각으로 추정)",
+    "active": "현재 활성 보정 (녹화 이후 보정 · 위치가 다를 수 있음)",
+}
 
 
 def latest_recording():
@@ -33,6 +41,63 @@ def latest_recording():
     if not candidates:
         raise FileNotFoundError("D405 깊이 영상이 포함된 완료된 녹화를 찾을 수 없습니다.")
     return max(candidates, key=lambda item: item[0])[1]
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _moment(text):
+    try:
+        moment = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.astimezone()
+
+
+def _usable(calibration, serials):
+    cameras = (calibration or {}).get("cameras") or {}
+    return any(camera.get("serial") in serials and camera.get("T_board_from_camera") is not None
+               for camera in cameras.values())
+
+
+def session_calibration(folder, manifest):
+    """Extrinsics that were in effect when this session was recorded.
+
+    Returns (calibration, origin, path); origin is a CALIBRATION_ORIGINS key or None.
+    1. the snapshot stored in the recording folder;
+    2. older recordings: the newest calibration created before the session started,
+       searched in this data root and next to the recording (…/recordings/<session> → …/calibrations);
+    3. the currently active calibration, flagged as possibly wrong."""
+    folder = Path(folder).resolve()
+    serials ={info.get("serial") for info in manifest.get("devices", {}).values()} - {None}
+    stored = _read_json(folder/SESSION_CALIBRATION)
+    if _usable(stored, serials):
+        return stored, "session", folder/SESSION_CALIBRATION
+    started = _moment(manifest.get("started_at"))
+    data_roots = {CALIBRATIONS.parent, folder.parent.parent}
+    paths = {ACTIVE_CALIBRATION.resolve(), *(root/"calibration.json" for root in data_roots)}
+    for root in data_roots:
+        if (root/"calibrations").is_dir():
+            paths.update((root/"calibrations").glob("*/calibration.json"))
+    candidates = []
+    for path in paths:
+        data = _read_json(path)
+        created = _moment((data or {}).get("created_at"))
+        if created and _usable(data, serials):
+            candidates.append((created, path, data))
+    if started:
+        before = [item for item in candidates if item[0] <= started]
+        if before:
+            _, path, data = max(before, key=lambda item: (item[0], "calibrations" in item[1].parts))
+            return data, "inferred", path
+    active = _read_json(ACTIVE_CALIBRATION)
+    if _usable(active, serials):
+        return active, "active", ACTIVE_CALIBRATION
+    return None, None, None
 
 
 def camera_rays(intrinsics):
@@ -226,7 +291,9 @@ class MultiSequence:
     Tracks are written against one host clock with gaps repeated, so the same frame
     index is the same moment for every camera (not hardware synchronized)."""
 
-    def __init__(self, folder, calibration=None):
+    def __init__(self, folder, calibration="session"):
+        """calibration: "session" picks the extrinsics in effect at record time
+        (see session_calibration); a dict is used as given; None disables board mode."""
         first = DepthSequence(folder)
         self.folder, self.manifest = first.folder, first.manifest
         self.camera_keys = list(first.camera_keys)
@@ -240,6 +307,10 @@ class MultiSequence:
             raise
         self.count = min(sequence.count for sequence in self.sequences.values())
         self.fps = first.fps
+        self.calibration_origin = self.calibration_path = None
+        if calibration == "session":
+            calibration, self.calibration_origin, self.calibration_path = session_calibration(self.folder, self.manifest)
+        self.calibration = calibration
         # Match extrinsics by serial so a slot reassignment cannot mix up cameras.
         by_serial = {camera.get("serial"): camera for camera in (calibration or {}).get("cameras", {}).values()}
         self.transforms = {}

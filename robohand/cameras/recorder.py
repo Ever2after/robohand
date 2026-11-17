@@ -17,6 +17,7 @@ import cv2
 import imageio_ffmpeg
 import numpy as np
 
+from ..paths import ACTIVE_CALIBRATION
 from .hub import STREAM_NAMES, StreamFrame, new_folder
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -257,6 +258,7 @@ class Recorder:
                                                    for key in keys if key.endswith("_depth") and frames[key].depth_range},
                         "depth_units": "uint16 sample * devices[camera_key].depth_scale_m = axial depth in meters",
                         "depth_invalid_values": [0, 65535],
+                        "calibration": self._snapshot_calibration(),
                         "tracks": {}}
             self._manifest(manifest)
             # Encoders initialize without camera locks; capture continues independently.
@@ -342,6 +344,22 @@ class Recorder:
                     logging.exception("Manifest write failed")
             self.result = manifest
             self.events.put(("error", self.error) if self.error else ("saved", str(self.folder)))
+
+    def _snapshot_calibration(self):
+        """Freeze the extrinsics in effect now, so replay never depends on later recalibration."""
+        try:
+            calibration = json.loads(ACTIVE_CALIBRATION.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as error:
+            logging.warning("Active calibration unreadable, not stored with the session: %s", error)
+            return {"file": None, "error": str(error)}
+        shutil.copyfile(ACTIVE_CALIBRATION, self.folder / "calibration.json")
+        return {"file": "calibration.json", "created_at": calibration.get("created_at"),
+                "board": calibration.get("board"),
+                "serials": sorted(camera.get("serial") for camera in calibration.get("cameras", {}).values()
+                                  if camera.get("serial")),
+                "note": "Copy of the active calibration at record start; replay uses it for extrinsics"}
 
     def _manifest(self, data):
         temp = self.folder / "session.tmp"

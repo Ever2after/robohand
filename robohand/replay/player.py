@@ -12,11 +12,10 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph.opengl as gl
 
-from ..calibration.board import load_calibration
 from ..devices.manus import FINGER_COLORS, load_manus, skeleton_layout
 from ..paths import APP_ICON, RECORDINGS, configure_logging
 from ..ui.theme import FONT
-from .reconstruction import CloudFrame, MultiSequence, latest_recording, write_ply
+from .reconstruction import CALIBRATION_ORIGINS, CloudFrame, MultiSequence, latest_recording, write_ply
 
 CAMERA_COLORS = [(1., .4, .3), (.3, 1., .6), (.4, .65, 1.)]
 BOARD_FRUSTUM_M = .1
@@ -451,8 +450,8 @@ class DepthPlayer(QtWidgets.QMainWindow):
 
     def open_folder(self,folder):
         try:
-            calibration=load_calibration()
-            sequence=MultiSequence(folder,calibration)
+            sequence=MultiSequence(folder)
+            calibration=sequence.calibration
             self.set_playing(False)
             if self.loader:
                 self.loader.finish()
@@ -476,8 +475,13 @@ class DepthPlayer(QtWidgets.QMainWindow):
             notes=[]
             if self.board_mode:
                 created=calibration.get("created_at","")[:16].replace("T"," ")
-                notes.append(f"calibration.json({created}) 외부 보정으로 세 카메라를 보드 좌표계(Z 위쪽)에 겹쳐 표시합니다. "
-                             "녹화 당시 카메라 위치가 보정과 같아야 정확합니다. 카메라 간 동기화는 하드웨어가 아닌 컴퓨터 시계 기준입니다.")
+                origin=CALIBRATION_ORIGINS.get(sequence.calibration_origin,"지정한 보정")
+                source=sequence.calibration_path
+                where=f"{source.parent.name}/{source.name}" if source else "calibration.json"
+                notes.append(f"외부 보정: {origin} · {where} ({created}). 세 카메라를 보드 좌표계(Z 위쪽)에 겹쳐 표시합니다. "
+                             "카메라 간 동기화는 하드웨어가 아닌 컴퓨터 시계 기준입니다.")
+                if sequence.calibration_origin=="active":
+                    notes.append("⚠ 이 녹화 이전에 만든 보정을 찾지 못해 현재 보정을 사용합니다. 카메라를 옮긴 뒤라면 구름이 어긋납니다.")
                 missing=[self.camera_checks[key].text() for key in sequence.camera_keys if key not in sequence.calibrated]
                 if missing:
                     notes.append(f"보정 데이터에 S/N이 없어 제외: {', '.join(missing)}")
@@ -785,7 +789,9 @@ class DepthPlayer(QtWidgets.QMainWindow):
                              frames[0].color_image,frames[0].depth_image,approximate,
                              min(f.min_z for f in frames),max(f.max_z for f in frames))
             name=f"{'+'.join(keys)}_frame_{self.current_index:06d}_{mode}_board.ply"
-            coordinates="meters; ChArUco board frame from calibration.json; X columns, Y opposite rows, Z above board"
+            created=(self.sequence.calibration or {}).get("created_at","unknown")
+            coordinates=(f"meters; ChArUco board frame (calibration created {created}, "
+                         f"{self.sequence.calibration_origin or 'given'}); X columns, Y opposite rows, Z above board")
         else:
             frame=frames[0]
             name=f"{keys[0]}_frame_{self.current_index:06d}_{mode}.ply"

@@ -71,6 +71,7 @@ MANUS SDK가 기본 경로(`C:\Program Files\MANUS\Core 3\ManusCore`)에 없으�
 | `manus.jsonl` | MANUS raw(IMU와 센서 5개), ergonomics(관절 40개, 도), skeleton(25노드, m). 약 66 Hz |
 | `vive.jsonl` | 트래커 포즈(위치 m, 쿼터니언 wxyz, 광학/관성 상태). 약 250 Hz |
 | `session.json` | 장치, 내부 파라미터, 깊이 스케일, 트랙별 통계, `manus`/`vive` 요약, 경고 |
+| `calibration.json` | 녹화 시작 시점에 적용 중이던 외부 보정의 사본. `session.json`의 `calibration`에 요약이 들어갑니다. |
 
 **시간 동기화:** 모든 영상 프레임과 `manus.jsonl`·`vive.jsonl`의 `t_host_s`는 같은 PC의 monotonic 시계 기준이며, 세션 시작(`session.json`의 `start_monotonic_s`)부터 잰 초입니다.
 영상 프레임 `i`의 시각은 `i / 30`초입니다. 장치 간 하드웨어 동기화는 아닙니다.
@@ -114,7 +115,11 @@ SDK로 받는 스트림은 약 66 Hz이고, 글러브 자체 샘플링은 약 11
 
 ## Depth Replay 3D
 
-- 최근 녹화(또는 지정한 세션)를 엽니다. 세 카메라의 일련번호가 `calibration.json`에 있으면 **보드 좌표계에 겹쳐서** 표시합니다.
+- 최근 녹화(또는 지정한 세션)를 엽니다. 카메라 일련번호가 보정 파일에 있으면 **보드 좌표계에 겹쳐서** 표시합니다.
+  내부 파라미터는 `session.json`에 기록된 값을 씁니다. 외부 보정은 녹화 당시 것을 아래 순서로 찾습니다. 어떤 보정을 썼는지는 화면 아래 설명에 표시됩니다.
+  1. 녹화 폴더의 `calibration.json` (녹화 시작 때 저장된 사본)
+  2. 사본이 없는 예전 녹화: `calibrations/`에서 녹화 시작 직전에 만든 보정
+  3. 둘 다 없으면 현재 `calibration.json` (경고 표시)
 - 상단의 **RGB-D 1·2·3** 체크박스로 카메라를 켜고 끕니다. 점 색상은 실제 컬러, 깊이 색상, 카메라별 색상 중에서 고릅니다.
 - `manus.jsonl`이 있으면 오른쪽 패널에 글러브 손 골격이 영상 시각에 맞춰 함께 재생됩니다.
   아직 손목 트래커를 연동하지 않아서, 각 손은 자기 손목을 기준으로 그려집니다.
