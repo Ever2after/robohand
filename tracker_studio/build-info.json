@@ -1,0 +1,11 @@
+{
+    "libsurvive_commit":  "44b1e2f0cb95e5697bc0b86f58fd8520a813b713",
+    "libsurvive_source":  "https://github.com/collabora/libsurvive",
+    "compiler":  "llvm-mingw-20261104-ucrt-x86_64",
+    "three_version":  "0.187.0",
+    "native_changes":  [
+                           "MinGW compiler flags and Windows headers",
+                           "Windows USB enumeration filtering and HID pairing report",
+                           "Native optical signal metrics"
+                       ]
+}

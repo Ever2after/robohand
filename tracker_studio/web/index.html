@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tracker Studio</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="importmap">{"imports":{"three":"/vendor/three/three.module.js"}}</script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">⌖</span><div>Tracker Studio<small>VIVE · libsurvive</small></div></div>
+      <div class="nav-item"><span aria-hidden="true">◈</span> 실시간 추적 <span class="nav-dot"></span></div>
+      <div class="section-heading">트래커 <span id="tracker-count">0</span></div>
+      <div id="device-list" class="device-list"><p class="muted empty-small">장치를 검색하고 있습니다.</p></div>
+      <div class="receiver-section"><div class="section-heading">USB 수신기 <span id="receiver-count">0</span></div><div id="receiver-list"></div></div>
+      <div class="sidebar-bottom">
+        <div class="section-heading">연결 관리</div>
+        <button id="pair-button" class="side-button"><span>↔</span> 트래커 페어링</button>
+        <button id="calibrate-button" class="side-button"><span>⌖</span> 보정 다시 시작</button>
+        <p class="setup-note">보정할 때 트래커를 베이스스테이션이 보이는 곳에 잠시 고정하세요.</p>
+        <div class="engine-state"><span id="engine-dot" class="dot amber"></span><span id="engine-text">엔진 시작 중</span><span class="local-label">LOCAL</span></div>
+      </div>
+    </aside>
+    <header class="header">
+      <div><h1>실시간 트래킹</h1><p>VIVE Tracker · Lighthouse 2.0</p></div>
+      <div class="header-actions"><span id="connection-status" class="status-pill"><span class="dot amber"></span> 연결 중</span><button id="reconnect-button" class="button secondary">⟳ <span>장치 다시 검색</span></button></div>
+    </header>
+    <main class="workspace">
+      <section class="viewport-panel" aria-label="트래커 3D 공간">
+        <div class="viewport-toolbar"><div class="panel-title"><span class="live-indicator"></span> 3D 공간 <span class="unit-tag">Z ↑ · m</span></div><div class="view-actions"><button class="view-button active" data-view="perspective">자유</button><button class="view-button" data-view="top">위</button><button class="view-button" data-view="front">정면</button><span class="toolbar-divider"></span><button id="fit-button" class="view-button" title="모든 트래커가 보이도록 카메라 맞춤">전체 보기</button></div></div>
+        <div id="viewport">
+          <div id="viewport-empty" class="viewport-empty"><div class="waiting-symbol">⌖</div><h2>트래커 신호를 기다리는 중</h2><p id="waiting-hint">트래커 전원을 켜고 베이스스테이션이 보이는 곳에 두세요.</p></div>
+          <div id="render-error" class="render-error" hidden></div>
+          <div class="scene-controls"><label><input id="trail-toggle" type="checkbox" checked> 이동 궤적</label><label><input id="axes-toggle" type="checkbox" checked> 회전 축</label><button id="clear-trails" class="text-button">궤적 지우기</button></div>
+          <div class="viewport-footer"><span>드래그 회전 · 휠 확대 · 우클릭 이동</span><div class="axis-legend"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span><span class="grid-label">격자 0.5 m</span></div></div>
+        </div>
+      </section>
+      <section class="telemetry-panel">
+        <div class="telemetry-heading"><div class="panel-title">위치 변화 <span id="chart-device" class="muted">선택된 트래커</span></div><div class="axis-legend"><span class="x">X</span><span class="y">Y</span><span class="z">Z</span><span class="muted">최근 10초 · m</span></div></div>
+        <canvas id="telemetry-chart" aria-label="최근 10초의 X Y Z 위치 그래프"></canvas>
+      </section>
+      <aside class="inspector">
+        <div class="inspector-heading"><h2>트래커 데이터</h2><span id="selected-status" class="small-status">대기</span></div>
+        <div class="device-identity"><div class="device-symbol">◈</div><div><strong id="selected-name">트래커 선택</strong><span id="selected-serial" class="mono">장치 연결 대기</span></div></div>
+        <div class="readout-heading">위치 <span>미터 · m</span></div>
+        <div class="readout-grid"><div><label class="x">X</label><output id="position-x">—</output></div><div><label class="y">Y</label><output id="position-y">—</output></div><div><label class="z">Z</label><output id="position-z">—</output></div></div>
+        <div class="readout-heading">회전각 <span>도 · °</span></div>
+        <div class="rotation-readouts"><div><span><i class="x">X</i> Roll</span><output id="rotation-x">—</output></div><div><span><i class="y">Y</i> Pitch</span><output id="rotation-y">—</output></div><div><span><i class="z">Z</i> Yaw</span><output id="rotation-z">—</output></div></div>
+        <details class="quaternion-details"><summary>쿼터니언 <span>w · x · y · z</span></summary><output id="quaternion-values">—</output><p>오른손 좌표계 · Rz(yaw) Ry(pitch) Rx(roll)</p></details>
+        <div class="signal-metrics"><div><span>좌표 수신율</span><strong id="sample-rate">— <small>Hz</small></strong></div><div><span>최근 수신</span><strong id="sample-age">— <small>ms</small></strong></div></div>
+        <section class="recording-section">
+          <div class="readout-heading">데이터 기록 <span id="record-badge">CSV</span></div>
+          <label class="field-label" for="session-name">기록 이름</label><input id="session-name" class="session-input" maxlength="48" value="vive_capture" autocomplete="off">
+          <div class="recording-stats"><strong id="record-duration">00:00.0</strong><span><b id="record-samples">0</b> 샘플</span></div>
+          <button id="record-button" class="button record-button" disabled><span class="record-icon"></span><span id="record-button-label">기록 시작</span></button>
+          <p id="record-hint" class="record-hint">광학 추적이 활성화되면 기록할 수 있습니다.</p>
+        </section>
+        <section class="files-section"><div class="readout-heading">저장된 기록 <span id="file-count">0</span></div><div id="file-list" class="file-list"><p class="muted empty-small">기록한 CSV가 여기에 표시됩니다.</p></div><p id="save-directory" class="save-directory" title="저장 폴더">로컬 recordings 폴더에 저장</p></section>
+      </aside>
+    </main>
+  </div>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <details class="diagnostics"><summary>진단 로그 <span id="base-status">베이스스테이션 대기</span></summary><div id="log-list"></div></details>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

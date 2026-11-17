@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Session data, user settings and logs (see README: DATA_ROOT)
+/data/
+*.log
+
+# Tracker Studio runtime state and recordings
+/tracker_studio/runtime/
+/tracker_studio/recordings/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

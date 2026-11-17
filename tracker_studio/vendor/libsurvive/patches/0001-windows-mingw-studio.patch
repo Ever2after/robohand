@@ -1,0 +1,140 @@
+diff --git a/libs/cnmatrix/CMakeLists.txt b/libs/cnmatrix/CMakeLists.txt
+index 4c1e811..5961084 100644
+--- a/libs/cnmatrix/CMakeLists.txt
++++ b/libs/cnmatrix/CMakeLists.txt
+@@ -96,7 +96,9 @@ IF(UNIX)
+   endif()
+ 
+ ELSEIF(WIN32)
+-  add_compile_options(/wd4244 /wd4996 /wd4018 /wd4101 /wd4477 /wd4068 /wd4217)
++  if(MSVC)
++    add_compile_options(/wd4244 /wd4996 /wd4018 /wd4101 /wd4477 /wd4068 /wd4217)
++  endif()
+   set( CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+   set (CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+ endif()
+diff --git a/libs/cnmatrix/src/CMakeLists.txt b/libs/cnmatrix/src/CMakeLists.txt
+index c238feb..9d2c11d 100644
+--- a/libs/cnmatrix/src/CMakeLists.txt
++++ b/libs/cnmatrix/src/CMakeLists.txt
+@@ -67,7 +67,7 @@ IF(USE_EIGEN)
+   add_definitions     ( ${EIGEN3_DEFINITIONS} )
+   include_directories ( ${EIGEN3_INCLUDE_DIR} )
+ 
+-  if(WIN32)
++  if(MSVC)
+     target_compile_options(cnmatrix PRIVATE -bigobj)
+   else()
+     target_compile_options(cnmatrix PRIVATE -fno-exceptions -fPIC)
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index b2e49d2..cd67095 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -23,6 +23,7 @@ SET(SURVIVE_SRCS ${SURVIVE_SRCS}
+     survive.c
+     survive_buildinfo.c
+     survive_api.c
++    studio_metrics.c
+     survive_config.c
+     survive_default_devices.c
+     survive_disambiguator.c
+diff --git a/src/driver_vive.c b/src/driver_vive.c
+index 005cfff..6661caa 100755
+--- a/src/driver_vive.c
++++ b/src/driver_vive.c
+@@ -235,7 +235,11 @@ static uint8_t vive_magic_protocol_switch[] = {
+ static uint8_t vive_magic_protocol_switch[64] = {
+ #endif
+ 	VIVE_REPORT_COMMAND, VIVE_COMMAND_CHANGE_PROTOCOL, 0x3, 0x00, 0x01, 0x00};
++#ifdef _WIN32
++static uint8_t vive_request_pairing[64] = {VIVE_REPORT_COMMAND, VIVE_COMMAND_PAIR, 0x03, 0x01, 0x10, 0x27};
++#else
+ static uint8_t vive_request_pairing[] = {VIVE_REPORT_COMMAND, VIVE_COMMAND_PAIR, 0x03, 0x01, 0x10, 0x27};
++#endif
+ 
+ #ifdef __linux__
+ static uint8_t vive_magic_protocol_super_magic[] = {
+@@ -741,8 +745,8 @@ static int AttachInterface(SurviveViveData *sv, struct SurviveUSBInfo *usbObject
+ 
+ static const struct DeviceInfo *find_known_device(SurviveContext *ctx, uint16_t idVendor, uint16_t idProduct) {
+ 	const char *blacklist = survive_configs(ctx, "blacklist-devs", SC_GET, 0);
+-	for (const struct DeviceInfo *info = KnownDeviceTypes; info->name && blacklist; info++) {
+-		if (info == 0 || strstr(blacklist, info->name)) {
++	for (const struct DeviceInfo *info = KnownDeviceTypes; info->name; info++) {
++		if (blacklist && strstr(blacklist, info->name)) {
+ 			continue;
+ 		}
+ 
+@@ -1020,7 +1024,8 @@ int survive_vive_usb_poll(SurviveContext *ctx, void *v) {
+ 	for (int i = 0; i < sv->udev_cnt; i++) {
+ 		struct SurviveUSBInfo *usbInfo = sv->udev[i];
+ 
+-		if ((usbInfo->device_info->pid == 0x2102 || usbInfo->device_info->pid == 0x2101) && usbInfo->so == 0 &&
++		if ((usbInfo->device_info->pid == 0x2102 || usbInfo->device_info->pid == 0x2101) &&
++			(usbInfo->so == 0 || !usbInfo->so->has_sensor_locations) &&
+ 			sv->requestPairing && (sv->lastPairTime + 1) < now && now > 3) {
+ 			survive_release_ctx_lock(ctx);
+ 			int r = update_feature_report(usbInfo->handle, 0, vive_request_pairing, sizeof(vive_request_pairing));
+diff --git a/src/lfsr_lh2.c b/src/lfsr_lh2.c
+index 4166df3..2a17afc 100644
+--- a/src/lfsr_lh2.c
++++ b/src/lfsr_lh2.c
+@@ -1,6 +1,10 @@
+ #include "lfsr_lh2.h"
+ #ifndef _MSC_VER
+-#include "alloca.h"
++#ifdef _WIN32
++#include <malloc.h>
++#else
++#include <alloca.h>
++#endif
+ #define clz(x) __builtin_clz(x)
+ #else
+ #include <intrin.h>
+diff --git a/src/survive_config.c b/src/survive_config.c
+index 8a228c9..b1f96a3 100644
+--- a/src/survive_config.c
++++ b/src/survive_config.c
+@@ -8,6 +8,9 @@
+ #else
+ #include <malloc.h> //for alloca
+ #endif
++#ifdef _WIN32
++#include <direct.h>
++#endif
+ 
+ #include "ctype.h"
+ #include "math.h"
+diff --git a/src/studio_metrics.c b/src/studio_metrics.c
+new file mode 100644
+index 0000000..c000ea6
+--- /dev/null
++++ b/src/studio_metrics.c
+@@ -0,0 +1,27 @@
++#define SURVIVE_ENABLE_FULL_API
++#include "survive_api.h"
++#include "survive.h"
++
++/* Keep structure-dependent diagnostics inside the native build. */
++SURVIVE_EXPORT int studio_object_metrics(SurviveSimpleContext *context,
++                                        const SurviveSimpleObject *object,
++                                        double *values) {
++    SurviveObject *tracked = survive_simple_get_survive_object(object);
++    if (!tracked)
++        return 0;
++
++    survive_simple_lock(context);
++    const SurviveSensorActivations *sensors = &tracked->activations;
++    survive_long_timecode last = SurviveSensorActivations_last_time(sensors);
++    values[0] = sensors->last_light && tracked->timebase_hz > 0
++                    ? (double)(last - sensors->last_light) / tracked->timebase_hz
++                    : -1.0;
++    values[1] = sensors->last_imu != 0;
++    values[2] = tracked->sensor_ct;
++    values[3] = tracked->PoseConfidence;
++    values[4] = tracked->ison;
++    values[5] = tracked->charge;
++    values[6] = tracked->charging;
++    survive_simple_unlock(context);
++    return 1;
++}
