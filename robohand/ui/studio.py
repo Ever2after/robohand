@@ -220,8 +220,9 @@ class Viewer(tk.Tk):
 
         tk.Frame(calibration_panel, bg=LINE, height=1).pack(fill="x", pady=10)
         label(calibration_panel, "4K RGB 렌즈(내부) 보정", 9, bold=True).pack(anchor="w")
-        label(calibration_panel, "웹캠마다 한 번. 보드를 손에 들고 위치·각도를 바꿔 가며 잠깐씩 멈추면 "
-                                 f"자동으로 {TARGET_VIEWS}장을 모읍니다. 줌 고정 · 자동 추적 끄기.",
+        label(calibration_panel, "웹캠마다 한 번. 보드를 움직이거나, 웹캠을 떼어 손에 들고 테이블의 보드를 "
+                                 "여러 방향에서 비추며 잠깐씩 멈추면 자동으로 촬영합니다 "
+                                 f"({TARGET_VIEWS}장, 아래 안내 참고). 줌 고정 · 자동 추적 끄기.",
               8, MUTED, justify="left", wraplength=230).pack(anchor="w", pady=(4,6))
         self.intrinsic_slot = ttk.Combobox(calibration_panel, state="readonly", font=(FONT,9),
                                            values=[EXTRA_TITLES[f"{slot}_color"] for slot in WEBCAM_SLOTS])

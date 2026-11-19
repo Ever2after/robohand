@@ -1,8 +1,10 @@
-"""Lens (intrinsic) calibration of the UVC webcams from a hand-moved ChArUco board.
+"""Lens (intrinsic) calibration of the UVC webcams from ~20 different board views.
 
 RealSense cameras keep their factory intrinsics; webcams have none, so each one is calibrated
-once from ~20 different board poses. Views are taken automatically while the board is held
-still in a pose that differs from the ones already collected. Results live in
+once. Only the relative pose matters: either move the board in front of the mounted webcam, or
+take the webcam off its mount and aim it at a board lying on the table. Views are taken
+automatically while the picture is still and the pose differs from the ones already collected;
+the status names image regions that still lack the board and asks for tilted views. Results live in
 DATA_ROOT/webcam_intrinsics.json, keyed by webcam slot (rgb4k_N) together with the USB device
 path seen at calibration time and the capture resolution.
 
@@ -25,6 +27,9 @@ TARGET_VIEWS = 20
 MIN_CORNERS = 12          # of 24 inner corners on the 7x5 board
 STILL_PX = 4.0            # mean corner motion (preview pixels) between checks to count as "held still"
 NOVELTY = .12             # minimum pose-descriptor distance to every collected view
+TILT_DEG = 25             # board normal this far from the optical axis counts as a tilted view
+TILTED_VIEWS = 6
+REGIONS = [["왼쪽 위", "위", "오른쪽 위"], ["왼쪽", "가운데", "오른쪽"], ["왼쪽 아래", "아래", "오른쪽 아래"]]
 
 
 def load_store():
@@ -76,6 +81,19 @@ def pose_descriptor(corners, ids, size):
     return np.array([*centre, spread * 2, angle, *perspective * 3])
 
 
+def tilt_degrees(points, ids, size):
+    """Angle between the board normal and the optical axis, from a rough pinhole model
+    (fx = 0.6 x width, i.e. ~80 deg horizontal FOV). The angle barely depends on that guess."""
+    width, height = size
+    matrix = np.array([[.6 * width, 0, width / 2], [0, .6 * width, height / 2], [0, 0, 1]])
+    ok, rotation, _ = cv2.solvePnP(world_corners()[np.asarray(ids)], np.asarray(points, dtype=float),
+                                   matrix, None, flags=cv2.SOLVEPNP_IPPE)
+    if not ok:
+        return 0.
+    normal_z = cv2.Rodrigues(rotation)[0][2, 2]
+    return float(np.degrees(np.arccos(min(1., abs(normal_z)))))
+
+
 class IntrinsicCollector:
     """Feed it webcam JPEGs; it keeps still, novel views and finally solves the lens model."""
 
@@ -85,6 +103,8 @@ class IntrinsicCollector:
         self.folder = CALIBRATIONS / datetime.now().strftime(f"intrinsics_{slot}_%Y%m%d_%H%M%S")
         self.views = []            # (ids, corners) at full resolution
         self.descriptors = []
+        self.regions = set()       # (row, column) of the 3x3 image grid where accepted boards were centred
+        self.tilted = 0
         self.size = None
         self.previous = None       # preview-scale corners from the last check (stillness test)
 
@@ -119,7 +139,7 @@ class IntrinsicCollector:
         if descriptor is None:
             return "보드 자세 계산 실패"
         if self.descriptors and min(np.linalg.norm(descriptor - d) for d in self.descriptors) < NOVELTY:
-            return "다른 위치·각도로 옮겨 주세요"
+            return "비슷한 장면 · " + self.guidance()
         image = cv2.imdecode(data, cv2.IMREAD_COLOR)
         full = detect_corners(image, self.spec)
         if len(full) < MIN_CORNERS:
@@ -128,9 +148,21 @@ class IntrinsicCollector:
         full_ids = sorted(full)
         self.views.append((full_ids, [full[i] for i in full_ids]))
         self.descriptors.append(descriptor)
+        centre = points.mean(axis=0)
+        self.regions.add((min(2, int(3 * centre[1] / height)), min(2, int(3 * centre[0] / width))))
+        self.tilted += tilt_degrees(points, ids, (width, height)) >= TILT_DEG
         self.folder.mkdir(parents=True, exist_ok=True)
         (self.folder / f"view_{len(self.views):02d}.jpg").write_bytes(jpeg)
-        return f"촬영 {len(self.views)}/{TARGET_VIEWS}"
+        return f"촬영 {len(self.views)}/{TARGET_VIEWS} · " + self.guidance()
+
+    def guidance(self):
+        """What the next views should add: uncovered image regions first, then tilted views."""
+        missing = [REGIONS[row][column] for row in range(3) for column in range(3) if (row, column) not in self.regions]
+        if missing:
+            return "보드가 화면의 " + ", ".join(missing[:3]) + (" 등" if len(missing) > 3 else "") + "에 오게"
+        if self.tilted < TILTED_VIEWS:
+            return f"보드를 비스듬히(30–45°) 본 장면 {TILTED_VIEWS - self.tilted}장 더"
+        return "거리·각도를 바꿔 계속"
 
     def calibrate(self):
         if len(self.views) < 8:
