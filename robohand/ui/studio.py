@@ -21,7 +21,8 @@ from ..calibration.board import (BOARD_SPEC, board_spec, calibrate, load_calibra
 from ..calibration.capture import capture as capture_calibration_frames
 from ..calibration.scale import fit_scale
 from ..cameras.d405 import LUT, distance_mm
-from ..cameras.extra import GROUPS as EXTRA_GROUPS, STREAM_TITLES as EXTRA_TITLES, ExtraCameras
+from ..cameras.extra import (GROUPS as EXTRA_GROUPS, PREVIEW_FPS, PREVIEW_WIDTH, STREAM_TITLES as EXTRA_TITLES,
+                             WEBCAM_SIZES, ExtraCameras)
 from ..cameras.hub import CAMERA_KEYS, CAMERA_NAMES, STREAM_NAMES, CameraHub
 from ..cameras.recorder import Recorder
 from ..devices.manus import ManusGlove
@@ -318,6 +319,17 @@ class Viewer(tk.Tk):
                         font=(FONT,9,"bold"),padx=10,pady=3,cursor="hand2")
             b.pack(side="left",padx=(0,3))
             self.layout_buttons[mode]=b
+        # Webcam capture resolution (4K RGB tab only). The dashboard always draws a 960 px / 10 fps copy.
+        self.webcam_options=tk.Frame(top,bg=BG)
+        label(self.webcam_options,"웹캠 캡처",9,MUTED).pack(side="left",padx=(0,6))
+        saved=self.settings.get("webcam_resolution","4K")
+        self.webcam_resolution=ttk.Combobox(self.webcam_options,values=list(WEBCAM_SIZES),state="readonly",
+                                            width=6,font=(FONT,9))
+        self.webcam_resolution.set(saved if saved in WEBCAM_SIZES else "4K")
+        self.webcam_resolution.pack(side="left")
+        self.webcam_resolution.bind("<<ComboboxSelected>>",self.select_webcam_resolution)
+        label(self.webcam_options,f"·  화면 {PREVIEW_WIDTH}px / {PREVIEW_FPS} fps",9,MUTED).pack(side="left",padx=(6,0))
+        self.extras.set_webcam_size(WEBCAM_SIZES[self.webcam_resolution.get()])
         label(top,"더블클릭: 확대 / 복귀   ·   F11: 전체 화면",9,MUTED).pack(side="right")
         self.views=tk.Frame(content,bg=BG)
         self.views.pack(fill="both",expand=True)
@@ -630,6 +642,14 @@ class Viewer(tk.Tk):
         return {f"{slot}_{kind}": (row, column) for column, slot in enumerate(slots)
                 for row, kind in enumerate(("color", "depth"))}, len(slots)
 
+    def select_webcam_resolution(self, event=None):
+        name = self.webcam_resolution.get()
+        self.settings["webcam_resolution"] = name
+        self.persist()
+        self.extra_errors.clear()
+        self.extras.set_webcam_size(WEBCAM_SIZES[name])
+        self.footer.configure(text=f"웹캠 캡처 해상도 {name} {WEBCAM_SIZES[name][0]}×{WEBCAM_SIZES[name][1]} · 다시 연결하는 중…")
+
     def set_group(self, group):
         if group == self.camera_group:
             return
@@ -676,6 +696,10 @@ class Viewer(tk.Tk):
         if mode=="both":
             self.glove_panel.grid(row=0,column=columns,rowspan=2,columnspan=1,sticky="nsew",padx=4,pady=4)
         self.glove_panel.last_token=None
+        if self.camera_group=="webcam":
+            self.webcam_options.pack(side="left",padx=(14,0))
+        else:
+            self.webcam_options.pack_forget()
         for key,b in [*self.layout_buttons.items(),*self.group_buttons.items()]:
             selected=key in (mode,self.camera_group)
             b.configure(bg=ACCENT if selected else CARD,fg=BG if selected else TEXT,

@@ -37,30 +37,41 @@ STREAM_TITLES = {
     **{f"rgb4k_{n}_color": f"4K RGB {n}" for n in (1, 2, 3, 4)},
 }
 D435_RANGE_M = (.2, 3.0)
-WEBCAM_SIZE = (3840, 2160)
+WEBCAM_SIZES = {"4K": (3840, 2160), "1080p": (1920, 1080), "720p": (1280, 720)}
 WEBCAM_FPS = 30
+# DirectShow, not Media Foundation: with four 4K MJPEG streams opened through MSMF in the
+# same process, Tk's timers and redraws stalled for 10-40 s at a time (reproduced without any
+# Camera Studio code; HW transforms off did not help). DirectShow decodes 4K at ~23 fps, 1080p at 30.
+BACKEND = cv2.CAP_DSHOW
+# The dashboard only needs a small, slower picture, so each capture thread prepares it
+# instead of the Tk thread shrinking four 4K frames every refresh.
+PREVIEW_WIDTH = 960
+PREVIEW_FPS = 10
 
 
 def list_webcams():
-    """UVC cameras that are not RealSense nodes, in a stable (device path) order."""
+    """Physical USB cameras that are not RealSense nodes, in a stable (device path) order.
+    Software cameras (e.g. "OBSBOT Virtual Camera") have no USB vendor id and are skipped."""
     from cv2_enumerate_cameras import enumerate_cameras
-    cameras = [camera for camera in enumerate_cameras(cv2.CAP_MSMF)
-               if "realsense" not in camera.name.lower() and camera.vid != 0x8086]
+    cameras = [camera for camera in enumerate_cameras(BACKEND)
+               if camera.vid and camera.vid != 0x8086 and camera.path.lower().startswith("\\\\?\\usb")
+               and "realsense" not in camera.name.lower() and "virtual" not in camera.name.lower()]
     return sorted(cameras, key=lambda camera: camera.path.lower())
 
 
 class Webcam:
-    """One UVC camera via Media Foundation (DirectShow only reaches ~15 fps at 4K MJPEG)."""
+    """One UVC camera (MJPEG) captured on its own thread."""
 
-    def __init__(self, index, path, name):
-        # Media Foundation enumeration is unreliable from worker threads, so the index is resolved
+    def __init__(self, index, path, name, size=WEBCAM_SIZES["4K"]):
+        # Device enumeration is unreliable from worker threads, so the index is resolved
         # during discovery (rerun on every tab switch, which also follows replugging).
-        self.index, self.path, self.name = index, path, name
+        self.index, self.path, self.name, self.size = index, path, name, tuple(size)
         self.lock = threading.Lock()
         self.events = queue.SimpleQueue()
         self.thread = None
         self.stop_event = threading.Event()
-        self.latest = None
+        self.latest = None     # full-resolution frame (snapshots)
+        self.preview = None    # PREVIEW_WIDTH-wide copy at PREVIEW_FPS (dashboard)
         self.info = {"name": name, "path": path}
 
     @property
@@ -72,7 +83,7 @@ class Webcam:
             return
         self.stop_event.clear()
         with self.lock:
-            self.latest = None
+            self.latest = self.preview = None
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"Webcam-{self.path[-12:]}")
         self.thread.start()
 
@@ -83,17 +94,21 @@ class Webcam:
         with self.lock:
             return self.latest, dict(self.info)
 
+    def preview_frame(self):
+        with self.lock:
+            return self.preview
+
     def _run(self):
         cap = None
         try:
-            cap = cv2.VideoCapture(self.index, cv2.CAP_MSMF)
+            cap = cv2.VideoCapture(self.index, BACKEND)
             if not cap.isOpened():
                 raise RuntimeError(f"{self.name}을(를) 열 수 없습니다. 다른 프로그램이 사용 중인지 확인하세요.")
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, WEBCAM_SIZE[0])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, WEBCAM_SIZE[1])
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
             cap.set(cv2.CAP_PROP_FPS, WEBCAM_FPS)
-            times, number, failures = deque(maxlen=60), 0, 0
+            times, number, failures, last_preview = deque(maxlen=60), 0, 0, 0.0
             while not self.stop_event.is_set():
                 ok, image = cap.read()
                 if not ok:
@@ -112,9 +127,20 @@ class Webcam:
                     with self.lock:
                         self.info.update(resolution=[image.shape[1], image.shape[0]])
                     self.events.put(("info", dict(self.info)))
-                frame = StreamFrame(image, True, number, now, datetime.now().astimezone().isoformat(), fps, True)
+                captured_at = datetime.now().astimezone().isoformat()
+                frame = StreamFrame(image, True, number, now, captured_at, fps, True)
+                preview = None
+                if now - last_preview >= 1 / PREVIEW_FPS:
+                    last_preview = now
+                    height, width = image.shape[:2]
+                    target = (min(PREVIEW_WIDTH, width), round(height * min(PREVIEW_WIDTH, width) / width))
+                    small = cv2.resize(image, target, interpolation=cv2.INTER_AREA) if target[0] < width else image
+                    preview = StreamFrame(small, True, number, now, captured_at, fps, True,
+                                          source_size=(width, height))
                 with self.lock:
                     self.latest = frame
+                    if preview is not None:
+                        self.preview = preview
         except Exception as error:
             logging.exception("Webcam error")
             if not self.stop_event.is_set():
@@ -135,6 +161,16 @@ class ExtraCameras:
         self.events = queue.SimpleQueue()
         self.switching = threading.Lock()
         self.generation = 0
+        self.webcam_size = WEBCAM_SIZES["4K"]
+
+    def set_webcam_size(self, size):
+        """Capture resolution of the webcams; restarts them if they are on screen."""
+        size = tuple(size)
+        if size == self.webcam_size:
+            return
+        self.webcam_size = size
+        if self.active == "webcam":
+            self.activate("webcam")   # _discover replaces webcams whose size differs
 
     def cameras(self):
         with self.lock:
@@ -213,28 +249,30 @@ class ExtraCameras:
         else:
             for slot, info in zip(WEBCAM_SLOTS, list_webcams()):
                 previous = current.get(slot)
-                if isinstance(previous, Webcam) and previous.path == info.path:
+                if isinstance(previous, Webcam) and previous.path == info.path and previous.size == self.webcam_size:
                     previous.index = info.index
                     found[slot] = previous
                 else:
-                    found[slot] = Webcam(info.index, info.path, info.name)
+                    found[slot] = Webcam(info.index, info.path, info.name, self.webcam_size)
         return found
 
-    def frames(self):
-        """StreamFrames of the running group, keyed like the preview panels."""
+    def frames(self, full=False):
+        """StreamFrames of the running group, keyed like the preview panels.
+        Webcams give their small preview copy unless `full` (snapshots)."""
         now = time.monotonic()
         result = {}
         shown = set(GROUPS[self.active]["slots"]) if self.active else set()
         for slot, camera in self.cameras().items():
             if slot not in shown:
                 continue
-            packet = camera.snapshot()[0]
+            packet = camera.snapshot()[0] if full or not isinstance(camera, Webcam) else camera.preview_frame()
             if packet is None:
                 continue
             live = camera.running and not camera.stop_event.is_set() and now-packet.received_at < 2
             if isinstance(camera, Webcam):
                 result[f"{slot}_color"] = StreamFrame(packet.image, True, packet.number, packet.received_at,
-                                                      packet.captured_at, packet.fps, live)
+                                                      packet.captured_at, packet.fps, live,
+                                                      source_size=packet.source_size)
             else:
                 for kind, image in (("color", packet.color), ("depth", packet.depth_rgb)):
                     result[f"{slot}_{kind}"] = StreamFrame(
@@ -254,7 +292,7 @@ class ExtraCameras:
 
     def save_snapshot(self, folder=None):
         """Full-resolution PNG of every live stream (plus raw D435 depth) into `folder` (created if None)."""
-        frames = {key: frame for key, frame in self.frames().items() if frame.live}
+        frames = {key: frame for key, frame in self.frames(full=True).items() if frame.live}
         if not frames:
             return folder
         folder = folder or new_folder(CAPTURES)

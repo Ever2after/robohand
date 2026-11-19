@@ -46,6 +46,7 @@ class StreamFrame:
     live: bool
     raw_depth: np.ndarray | None = None
     depth_range: tuple | None = None
+    source_size: tuple | None = None   # (w, h) of the camera stream when `image` is a downscaled preview
 
 
 class CameraHub:

@@ -61,7 +61,8 @@ class Preview(tk.Frame):
         live = frame is not None and frame.live
         if frame:
             ih,iw = frame.image.shape[:2]
-            self.status.configure(text=f"{'● REC  ' if recording else ''}{iw} × {ih}  ·  {frame.fps:.1f} fps" if live else "연결 종료 · 마지막 프레임",
+            sw,sh = frame.source_size or (iw,ih)
+            self.status.configure(text=f"{'● REC  ' if recording else ''}{sw} × {sh}  ·  {frame.fps:.1f} fps" if live else "연결 종료 · 마지막 프레임",
                                   fg=RED if recording else ACCENT if live else MUTED)
             token = (frame.number, frame.received_at, point, live, recording, cw,ch, bool(overlay))
         else:
