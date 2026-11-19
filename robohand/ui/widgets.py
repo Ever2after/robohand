@@ -27,13 +27,13 @@ def button(parent, text, command, primary=False, **kw):
 
 
 class Preview(tk.Frame):
-    def __init__(self, parent, key, select, zoom):
+    def __init__(self, parent, key, select, zoom, title=None):
         super().__init__(parent, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         self.key, self.select = key, select
         self.photo, self.bounds, self.last_token = None, None, None
         heading = tk.Frame(self, bg=PANEL)
         heading.pack(fill="x", padx=13, pady=(10, 7))
-        label(heading, STREAM_NAMES[key], 11, bold=True).pack(side="left")
+        label(heading, title or STREAM_NAMES[key], 11, bold=True).pack(side="left")
         self.status = label(heading, "대기 중", 8, MUTED)
         self.status.pack(side="right")
         self.canvas = tk.Canvas(self, bg="#080e15", highlightthickness=0,

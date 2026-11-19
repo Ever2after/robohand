@@ -1,4 +1,4 @@
-"""One RealSense D405: colour + colour-aligned depth on a background thread."""
+"""One RealSense RGB-D camera (D405 by default, also D435): colour + colour-aligned depth on a thread."""
 from __future__ import annotations
 
 from collections import deque
@@ -62,8 +62,9 @@ class Frame:
 
 
 class Camera:
-    def __init__(self, serial=None, resolution=(640, 480), fps=None):
+    def __init__(self, serial=None, resolution=(640, 480), fps=None, model="D405"):
         self.serial = serial
+        self.model = model  # substring of the RealSense product name, e.g. "D405" or "D435"
         self.resolution = resolution
         self.requested_fps = fps
         self.lock = threading.Lock()
@@ -85,7 +86,7 @@ class Camera:
         self.stop_event.clear()
         with self.lock:
             self.latest = None
-        self.thread = threading.Thread(target=self._run, daemon=True, name=f"D405-{self.serial or 'default'}")
+        self.thread = threading.Thread(target=self._run, daemon=True, name=f"{self.model}-{self.serial or 'default'}")
         self.thread.start()
 
     def stop(self):
@@ -108,10 +109,10 @@ class Camera:
             self.events.put(("state", "연결 중"))
             context = rs.context()
             devices = [d for d in context.query_devices()
-                       if "D405" in d.get_info(rs.camera_info.name)
+                       if self.model in d.get_info(rs.camera_info.name)
                        and (self.serial is None or d.get_info(rs.camera_info.serial_number) == self.serial)]
             if not devices:
-                raise RuntimeError(f"D405 {self.serial or ''} 연결을 확인한 뒤 다시 연결하세요.")
+                raise RuntimeError(f"{self.model} {self.serial or ''} 연결을 확인한 뒤 다시 연결하세요.")
             device = devices[0]
             usb = device.get_info(rs.camera_info.usb_type_descriptor)
             fps = self.requested_fps or (self.usb2_fps if usb.startswith('2') else 30)

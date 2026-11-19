@@ -21,6 +21,7 @@ from ..calibration.board import (BOARD_SPEC, board_spec, calibrate, load_calibra
 from ..calibration.capture import capture as capture_calibration_frames
 from ..calibration.scale import fit_scale
 from ..cameras.d405 import LUT, distance_mm
+from ..cameras.extra import GROUPS as EXTRA_GROUPS, STREAM_TITLES as EXTRA_TITLES, ExtraCameras
 from ..cameras.hub import CAMERA_KEYS, CAMERA_NAMES, STREAM_NAMES, CameraHub
 from ..cameras.recorder import Recorder
 from ..devices.manus import ManusGlove
@@ -34,7 +35,7 @@ from .widgets import GlovePanel, Preview, button, label
 class Viewer(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Camera Studio | 3 RGB-D Cameras")
+        self.title("Camera Studio | RGB-D + 4K RGB")
         self.configure(bg=BG)
         self.geometry(f"{min(1600,self.winfo_screenwidth()-80)}x{min(950,self.winfo_screenheight()-90)}")
         self.minsize(1160,780)
@@ -45,6 +46,11 @@ class Viewer(tk.Tk):
         self.recorder = Recorder(self.hub)
         self.glove = ManusGlove()
         self.tracker = ViveTracker()
+        self.extras = ExtraCameras()
+        self.camera_group = self.settings.get("camera_group", "d405")
+        if self.camera_group not in ("d405", *EXTRA_GROUPS):
+            self.camera_group = "d405"
+        self.extra_errors = {}
         self.output_dir = Path(self.settings.get("recording_directory", str(RECORDINGS)))
         self.points = {key: (320, 240) for key in CAMERA_KEYS}
         self.selected_camera = CAMERA_KEYS[0]
@@ -69,6 +75,8 @@ class Viewer(tk.Tk):
         self.after(400,self.glove.start)
         if self.settings.get("vive_autoconnect", True):
             self.after(600,self.tracker.start)
+        if self.camera_group != "d405":
+            self.after(800, lambda: self.extras.activate(self.camera_group))
         self.after(70,self.tick)
 
     def _build(self):
@@ -85,7 +93,7 @@ class Viewer(tk.Tk):
         brand = tk.Frame(header,bg=BG)
         brand.pack(side="left")
         label(brand,"CAMERA STUDIO",20,bold=True).pack(anchor="w")
-        label(brand,"RealSense D405 × 3  /  컬러 · 깊이 동시 캡처",9,MUTED).pack(anchor="w",pady=(3,0))
+        label(brand,"RealSense D405 × 3 동시 캡처  /  D435 · 4K RGB 미리보기",9,MUTED).pack(anchor="w",pady=(3,0))
         self.top_status = label(header,"●  카메라 연결 준비",11,MUTED)
         self.top_status.pack(side="right")
 
@@ -293,8 +301,17 @@ class Viewer(tk.Tk):
         top=tk.Frame(content,bg=BG)
         top.pack(fill="x",pady=(0,8))
         label(top,"LIVE MONITOR",9,MUTED,True).pack(side="left")
+        groups=tk.Frame(top,bg=BG)
+        groups.pack(side="left",padx=(16,0))
+        self.group_buttons={}
+        for group,caption in [("d405","D405 × 3"),("d435","D435 × 2"),("webcam","4K RGB × 4")]:
+            b=tk.Button(groups,text=caption,command=partial(self.set_group,group),relief="flat",borderwidth=0,
+                        font=(FONT,9,"bold"),padx=10,pady=3,cursor="hand2")
+            b.pack(side="left",padx=(0,3))
+            self.group_buttons[group]=b
+        tk.Frame(top,bg=LINE,width=1,height=18).pack(side="left",padx=(10,0))
         switch=tk.Frame(top,bg=BG)
-        switch.pack(side="left",padx=(16,0))
+        switch.pack(side="left",padx=(10,0))
         self.layout_buttons={}
         for mode,caption in [("cameras","카메라"),("both","카메라+글러브"),("glove","글러브 3D")]:
             b=tk.Button(switch,text=caption,command=partial(self.set_layout,mode),relief="flat",borderwidth=0,
@@ -311,6 +328,8 @@ class Viewer(tk.Tk):
             camera_key, kind = key.rsplit("_", 1)
             panel=Preview(self.views,key,partial(self.select_point, camera_key),self.zoom)
             self.panels[key]=panel
+        for key,title in EXTRA_TITLES.items():
+            self.panels[key]=Preview(self.views,key,lambda *_: None,self.zoom,title)
         self.glove_panel=GlovePanel(self.views)
         self.layout_mode=self.settings.get("monitor_layout","both")
         self.apply_layout()
@@ -513,9 +532,13 @@ class Viewer(tk.Tk):
             return
         if self.hub.running:
             self.hub.stop()
+            self.extras.stop_all()
         else:
             self.camera_errors.clear()
+            self.extra_errors.clear()
             self.hub.start(self.settings.get("realsense_serials"))
+            if self.camera_group != "d405":
+                self.extras.activate(self.camera_group)
 
     def reassign(self):
         if self.calibrating:
@@ -570,7 +593,14 @@ class Viewer(tk.Tk):
         self.footer.configure(text="스냅샷 저장 중…")
         def work():
             try:
-                self.ui_events.put(("snapshot",str(self.hub.save_snapshot())))
+                try:
+                    folder=self.hub.save_snapshot()
+                except RuntimeError:
+                    if not any(frame.live for frame in self.extras.frames().values()):
+                        raise
+                    folder=None
+                folder=self.extras.save_snapshot(folder)  # full-resolution D435 / 4K frames of the shown group
+                self.ui_events.put(("snapshot",str(folder)))
             except Exception as error:
                 logging.exception("Snapshot failed")
                 self.ui_events.put(("snapshot_error",str(error)))
@@ -591,10 +621,29 @@ class Viewer(tk.Tk):
         self.depth_camera.set(CAMERA_NAMES[camera_key])
         self.select_depth_camera()
 
-    @staticmethod
-    def panel_position(key):
-        camera_key, kind = key.rsplit("_", 1)
-        return (0 if kind == "color" else 1, CAMERA_KEYS.index(camera_key))
+    def group_layout(self):
+        """(panel key -> (row, column), column count) for the camera group on screen."""
+        if self.camera_group == "webcam":
+            keys = EXTRA_GROUPS["webcam"]["streams"]
+            return {key: divmod(index, 2) for index, key in enumerate(keys)}, 2
+        slots = CAMERA_KEYS if self.camera_group == "d405" else EXTRA_GROUPS["d435"]["slots"]
+        return {f"{slot}_{kind}": (row, column) for column, slot in enumerate(slots)
+                for row, kind in enumerate(("color", "depth"))}, len(slots)
+
+    def set_group(self, group):
+        if group == self.camera_group:
+            return
+        self.camera_group = group
+        self.focused = None
+        self.settings["camera_group"] = group
+        self.persist()
+        self.extra_errors.clear()
+        self.extras.activate(None if group == "d405" else group)
+        if group != "d405":
+            self.footer.configure(text=f"{EXTRA_GROUPS[group]['title']} 카메라를 여는 중… (미리보기 전용 · 녹화에는 아직 포함되지 않습니다)")
+        else:
+            self.footer.configure(text="D405 화면 · D435 / 4K RGB 카메라는 정지했습니다.")
+        self.apply_layout()
 
     def zoom(self,key):
         self.focused=None if self.focused==key else key
@@ -608,27 +657,29 @@ class Viewer(tk.Tk):
         self.apply_layout()
 
     def apply_layout(self):
-        """Camera grid in columns 0-2; the glove panel takes column 3 ('both') or everything ('glove')."""
+        """Camera grid of the selected group in the first columns; the glove panel takes the next
+        column ('both') or everything ('glove')."""
         mode=self.layout_mode if self.layout_mode in ("cameras","both","glove") else "both"
-        for n in range(4):
-            self.views.columnconfigure(n,weight=1 if n<3 or mode=="both" else 0,
-                                       uniform="camera" if n<3 or mode=="both" else "")
+        positions,columns=self.group_layout()
+        for n in range(5):
+            used=n<columns or (mode=="both" and n==columns)
+            self.views.columnconfigure(n,weight=1 if used else 0,uniform="camera" if used else "")
         for panel in [*self.panels.values(),self.glove_panel]:
             panel.grid_remove()
         if mode=="glove":
-            self.glove_panel.grid(row=0,column=0,rowspan=2,columnspan=4,sticky="nsew",padx=4,pady=4)
-        elif self.focused:
-            self.panels[self.focused].grid(row=0,column=0,rowspan=2,columnspan=3,sticky="nsew",padx=4,pady=4)
+            self.glove_panel.grid(row=0,column=0,rowspan=2,columnspan=columns+1,sticky="nsew",padx=4,pady=4)
+        elif self.focused in positions:
+            self.panels[self.focused].grid(row=0,column=0,rowspan=2,columnspan=columns,sticky="nsew",padx=4,pady=4)
         else:
-            for key,panel in self.panels.items():
-                row,column=self.panel_position(key)
-                panel.grid(row=row,column=column,rowspan=1,columnspan=1,sticky="nsew",padx=4,pady=4)
+            for key,(row,column) in positions.items():
+                self.panels[key].grid(row=row,column=column,rowspan=1,columnspan=1,sticky="nsew",padx=4,pady=4)
         if mode=="both":
-            self.glove_panel.grid(row=0,column=3,rowspan=2,columnspan=1,sticky="nsew",padx=4,pady=4)
+            self.glove_panel.grid(row=0,column=columns,rowspan=2,columnspan=1,sticky="nsew",padx=4,pady=4)
         self.glove_panel.last_token=None
-        for key,b in self.layout_buttons.items():
-            b.configure(bg=ACCENT if key==mode else CARD,fg=BG if key==mode else TEXT,
-                        activebackground="#a6f3df" if key==mode else LINE)
+        for key,b in [*self.layout_buttons.items(),*self.group_buttons.items()]:
+            selected=key in (mode,self.camera_group)
+            b.configure(bg=ACCENT if selected else CARD,fg=BG if selected else TEXT,
+                        activebackground="#a6f3df" if selected else LINE)
 
     def escape(self):
         if self.focused:
@@ -663,6 +714,20 @@ class Viewer(tk.Tk):
                     self.footer.configure(text=f"{key}: {value}")
                 elif kind=="info":
                     self.camera_errors.pop(key,None)
+        while not self.extras.events.empty():
+            event=self.extras.events.get()
+            if event[0]=="error":
+                self.footer.configure(text=event[1])
+            elif event[0]=="devices" and event[1]==self.camera_group:
+                title=EXTRA_GROUPS[event[1]]["title"]
+                expected=len(EXTRA_GROUPS[event[1]]["slots"])
+                self.footer.configure(text=f"{title} {len(event[2])}/{expected}대 검색됨 · 미리보기 전용 (녹화에는 아직 포함되지 않습니다)")
+        for slot,kind,value in self.extras.drain_errors():
+            if kind=="error":
+                self.extra_errors[slot]=value
+                self.footer.configure(text=f"{slot}: {value}")
+            else:
+                self.extra_errors.pop(slot,None)
         while not self.recorder.events.empty():
             kind,value=self.recorder.events.get()
             if kind=="started":
@@ -751,8 +816,13 @@ class Viewer(tk.Tk):
         mm = distances[self.selected_camera]
         self.depth_distance.configure(text=f"{mm:,.1f} mm" if mm is not None else "— mm")
         self.depth_details.configure(text=f"{CAMERA_NAMES[self.selected_camera]} 픽셀 {self.points[self.selected_camera]} · 5×5 중앙값")
+        extra_frames = self.extras.frames() if self.camera_group != "d405" else {}
         for key,panel in self.panels.items():
             camera_key = key.rsplit("_", 1)[0]
+            if camera_key not in CAMERA_KEYS:
+                if self.camera_group != "d405" and key in EXTRA_GROUPS[self.camera_group]["streams"]:
+                    panel.render(extra_frames.get(key), None, "", False)
+                continue
             overlay = None
             if self.show_calibration.get() and self.calibration and key.endswith("_color"):
                 info = self.hub.cameras()[camera_key].snapshot()[1]
@@ -760,15 +830,38 @@ class Viewer(tk.Tk):
                 if calibrated_camera and info.get("serial") == calibrated_camera["serial"]:
                     overlay = (calibrated_camera, info["color_intrinsics"])
             panel.render(frames.get(key),self.points[camera_key],measurements[camera_key],recording and key in self.recorder.tracks, overlay)
-        self.summary.configure(text="  ·  ".join(f"{CAMERA_NAMES[key]} 선택 깊이 {measurements[key]}" for key in CAMERA_KEYS))
+        if self.camera_group == "d405":
+            self.summary.configure(text="  ·  ".join(f"{CAMERA_NAMES[key]} 선택 깊이 {measurements[key]}" for key in CAMERA_KEYS))
+        else:
+            self.summary.configure(text=self.extra_summary(extra_frames))
         if self.closing:
             if not busy:
                 self.hub.stop()
-                if ((not self.hub.running and not self.glove.running and not self.tracker.running)
+                if ((not self.hub.running and not self.glove.running and not self.tracker.running
+                     and not self.extras.running)
                         or time.monotonic()-self.close_started>12) and not self.saving:
                     self.destroy()
                     return
         self.after(65,self.tick)
+
+    def extra_summary(self, frames):
+        parts=[]
+        cameras=self.extras.cameras()
+        for slot in EXTRA_GROUPS[self.camera_group]["slots"]:
+            name=EXTRA_TITLES[f"{slot}_color"].replace(" 컬러","")
+            camera=cameras.get(slot)
+            frame=frames.get(f"{slot}_color")
+            if camera is None:
+                parts.append(f"{name} 없음")
+            elif slot in self.extra_errors:
+                parts.append(f"{name} 오류")
+            elif frame and frame.live:
+                info=camera.snapshot()[1]
+                usb=f" · USB {info['usb']}" if info.get("usb") else ""
+                parts.append(f"{name} {frame.fps:.0f} fps{usb}")
+            else:
+                parts.append(f"{name} 연결 중")
+        return "  ·  ".join(parts)+"   |   미리보기 전용"
 
     def update_glove_status(self, recording):
         status = self.glove.status()
@@ -835,6 +928,7 @@ class Viewer(tk.Tk):
         self.close_started=time.monotonic()
         self.persist()
         self.glove.stop_event.set()
+        self.extras.stop_all()
         threading.Thread(target=self.tracker.stop, daemon=True, name="VIVE-stop").start()
         if self.recorder.busy:
             self.recorder.stop()
