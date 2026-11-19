@@ -1,4 +1,5 @@
-"""Multi-track H.264 and lossless depth recording for RealSense RGB-D cameras."""
+"""Multi-track H.264 and lossless depth recording for RealSense RGB-D cameras (D405 and D435),
+plus external sources (webcams, gloves, trackers) on the same session clock."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -18,7 +19,12 @@ import imageio_ffmpeg
 import numpy as np
 
 from ..paths import ACTIVE_CALIBRATION
+from .extra import STREAM_TITLES as EXTRA_TITLES
 from .hub import STREAM_NAMES, StreamFrame, new_folder
+
+
+def stream_name(key):
+    return STREAM_NAMES.get(key) or EXTRA_TITLES.get(key) or key
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -183,8 +189,9 @@ class TrackWriter:
 
 
 class Recorder:
-    def __init__(self, hub):
+    def __init__(self, hub, extras=None):
         self.hub = hub
+        self.extras = extras   # ExtraCameras: D435 tracks come from here
         self.events = queue.SimpleQueue()
         self.thread = None
         self.stop_event = threading.Event()
@@ -201,16 +208,16 @@ class Recorder:
     def busy(self):
         return self.thread is not None and self.thread.is_alive()
 
-    SOURCE_NAMES = {"manus": "MANUS 글러브", "vive": "VIVE 트래커"}
+    SOURCE_NAMES = {"manus": "MANUS 글러브", "vive": "VIVE 트래커", "webcams": "4K RGB 웹캠"}
 
     def start(self, keys, parent, fps=30, sources=None):
         """``sources``: {"manus": ManusGlove, "vive": ViveTracker, ...} recorded into the same
         session folder on the same monotonic clock (each provides status/begin/end)."""
         if self.busy:
             return
-        if not keys:
-            raise ValueError("녹화할 영상을 하나 이상 선택하세요.")
         sources = {name: source for name, source in (sources or {}).items() if source is not None}
+        if not keys and not sources:
+            raise ValueError("녹화할 영상을 하나 이상 선택하세요.")
         for name, source in sources.items():
             status = source.status()
             if not status["live"]:
@@ -229,26 +236,26 @@ class Recorder:
         self.stop_event.set()
 
     def _failed(self, key, error):
-        self.error = f"{STREAM_NAMES[key]}: {error}"
+        self.error = f"{stream_name(key)}: {error}"
         self.stop()
 
     def _run(self, keys, parent, fps):
         manifest = {}
         count = 0
         try:
-            frames = self.hub.frames()
-            unavailable = [STREAM_NAMES[k] for k in keys if k not in frames or not frames[k].live]
+            frames = self._frames()
+            unavailable = [stream_name(k) for k in keys if k not in frames or not frames[k].live]
             if unavailable:
                 raise RuntimeError("실시간 영상이 없습니다: " + ", ".join(unavailable))
             for key in keys:
                 if key.endswith("_depth") and frames[key].raw_depth is None:
-                    raise RuntimeError(f"{STREAM_NAMES[key]} 원본 깊이값을 수신하지 못했습니다.")
+                    raise RuntimeError(f"{stream_name(key)} 원본 깊이값을 수신하지 못했습니다.")
             parent.mkdir(parents=True, exist_ok=True)
             if shutil.disk_usage(parent).free < 512*1024*1024:
                 raise RuntimeError("녹화 저장 공간이 부족합니다. 512 MB 이상 확보하세요.")
             self.folder = new_folder(parent)
             manifest = {"format_version": 3, "status": "recording", "started_at": datetime.now().astimezone().isoformat(),
-                        "output_fps": fps, "audio": False, "devices": self.hub.metadata(),
+                        "output_fps": fps, "audio": False, "devices": self._metadata(),
                         "selected_streams": keys,
                         "timing": "Common host monotonic clock; nearest latest sample, repeat gaps; not hardware synchronized",
                         "depth_video": "Colorized MP4 plus lossless uint16 FFV1 sidecar for 3D replay",
@@ -284,7 +291,7 @@ class Recorder:
                 elapsed = time.monotonic()-self.started_at
                 index = int(elapsed*fps)
                 if index > last_index:
-                    current = self.hub.frames()
+                    current = self._frames()
                     for key, track in self.tracks.items():
                         frame = current.get(key)
                         if frame is None:
@@ -320,7 +327,7 @@ class Recorder:
             for track in self.tracks.values():
                 track.thread.join()
             if manifest:
-                warnings = [f"{STREAM_NAMES[k]}: {t.missing} frames unavailable"
+                warnings = [f"{stream_name(k)}: {t.missing} frames unavailable"
                             for k,t in self.tracks.items() if t.missing]
                 for name, summary in summaries.items():
                     if summary is None:
@@ -360,6 +367,18 @@ class Recorder:
                 "serials": sorted(camera.get("serial") for camera in calibration.get("cameras", {}).values()
                                   if camera.get("serial")),
                 "note": "Copy of the active calibration at record start; replay uses it for extrinsics"}
+
+    def _frames(self):
+        frames = self.hub.frames()
+        if self.extras is not None:
+            frames.update(self.extras.frames())
+        return frames
+
+    def _metadata(self):
+        devices = self.hub.metadata()
+        if self.extras is not None:
+            devices.update(self.extras.metadata())
+        return devices
 
     def _manifest(self, data):
         temp = self.folder / "session.tmp"

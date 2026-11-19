@@ -22,7 +22,7 @@ from ..calibration.capture import capture as capture_calibration_frames
 from ..calibration.scale import fit_scale
 from ..cameras.d405 import LUT, distance_mm
 from ..cameras.extra import (GROUPS as EXTRA_GROUPS, PREVIEW_FPS, PREVIEW_WIDTH, STREAM_TITLES as EXTRA_TITLES,
-                             WEBCAM_SIZES, ExtraCameras)
+                             WEBCAM_SIZES, WEBCAM_SLOTS, ExtraCameras, WebcamRecordingSource)
 from ..cameras.hub import CAMERA_KEYS, CAMERA_NAMES, STREAM_NAMES, CameraHub
 from ..cameras.recorder import Recorder
 from ..devices.manus import ManusGlove
@@ -31,6 +31,11 @@ from ..paths import ACTIVE_CALIBRATION, APP_ICON, CALIBRATIONS, LOGS, RECORDINGS
 from ..settings import read_settings, write_settings
 from .theme import ACCENT, AMBER, BG, CARD, FONT, LINE, MUTED, PANEL, RED, TEXT
 from .widgets import GlovePanel, Preview, button, label
+
+# MANUS glove / VIVE tracker integration stays in the code (devices/, Recorder sources, replay)
+# but is hidden from the dashboard for now: no sidebar rows, record options, glove view or
+# auto-connect. Set True to bring it back.
+GLOVE_TRACKER_UI = False
 
 
 class Viewer(tk.Tk):
@@ -44,10 +49,10 @@ class Viewer(tk.Tk):
             self.iconbitmap(str(APP_ICON))
         self.settings = read_settings()
         self.hub = CameraHub()
-        self.recorder = Recorder(self.hub)
+        self.extras = ExtraCameras()
+        self.recorder = Recorder(self.hub, self.extras)
         self.glove = ManusGlove()
         self.tracker = ViveTracker()
-        self.extras = ExtraCameras()
         self.camera_group = self.settings.get("camera_group", "d405")
         if self.camera_group not in ("d405", *EXTRA_GROUPS):
             self.camera_group = "d405"
@@ -73,11 +78,11 @@ class Viewer(tk.Tk):
         self.bind("<space>",lambda e:self.toggle_connection() if e.widget.winfo_class() not in
                   {"Entry","Spinbox","TEntry","TSpinbox","TCombobox"} else None)
         self.after(200,self.hub.start)
-        self.after(400,self.glove.start)
-        if self.settings.get("vive_autoconnect", True):
-            self.after(600,self.tracker.start)
-        if self.camera_group != "d405":
-            self.after(800, lambda: self.extras.activate(self.camera_group))
+        if GLOVE_TRACKER_UI:
+            self.after(400,self.glove.start)
+            if self.settings.get("vive_autoconnect", True):
+                self.after(600,self.tracker.start)
+        self.after(800,self.update_extra_cameras)
         self.after(70,self.tick)
 
     def _build(self):
@@ -94,7 +99,7 @@ class Viewer(tk.Tk):
         brand = tk.Frame(header,bg=BG)
         brand.pack(side="left")
         label(brand,"CAMERA STUDIO",20,bold=True).pack(anchor="w")
-        label(brand,"RealSense D405 × 3 동시 캡처  /  D435 · 4K RGB 미리보기",9,MUTED).pack(anchor="w",pady=(3,0))
+        label(brand,"RealSense D405 × 3  ·  D435 × 2  ·  4K RGB × 4  동시 녹화",9,MUTED).pack(anchor="w",pady=(3,0))
         self.top_status = label(header,"●  카메라 연결 준비",11,MUTED)
         self.top_status.pack(side="right")
 
@@ -117,28 +122,29 @@ class Viewer(tk.Tk):
             self.device_labels[key].pack(in_=detail, anchor="e")
             self.device_details[key] = label(detail, "S/N —", 8, MUTED)
             self.device_details[key].pack(anchor="e")
-        glove_row = tk.Frame(sidebar,bg=PANEL)
-        glove_row.pack(fill="x",pady=(0,4))
-        label(glove_row,"글러브",10,bold=True,width=7,anchor="w").pack(side="left",padx=10,pady=7)
-        glove_detail = tk.Frame(glove_row,bg=PANEL)
-        glove_detail.pack(side="right",padx=10,pady=4)
-        self.glove_label = label(glove_detail,"MANUS 대기",9,MUTED)
-        self.glove_label.pack(anchor="e")
-        self.glove_detail = label(glove_detail,"",8,MUTED,wraplength=150,justify="right")
-        self.glove_detail.pack(anchor="e")
-        for widget in (glove_row, glove_detail, self.glove_label, self.glove_detail):
-            widget.bind("<Button-1>", self.retry_glove)
-        tracker_row = tk.Frame(sidebar,bg=PANEL,cursor="hand2")
-        tracker_row.pack(fill="x",pady=(0,4))
-        label(tracker_row,"트래커",10,bold=True,width=7,anchor="w").pack(side="left",padx=10,pady=7)
-        tracker_detail = tk.Frame(tracker_row,bg=PANEL)
-        tracker_detail.pack(side="right",padx=10,pady=4)
-        self.tracker_label = label(tracker_detail,"VIVE 대기",9,MUTED,wraplength=170,justify="right")
-        self.tracker_label.pack(anchor="e")
-        self.tracker_detail = label(tracker_detail,"",8,MUTED,wraplength=170,justify="right")
-        self.tracker_detail.pack(anchor="e")
-        for widget in (tracker_row, tracker_detail, self.tracker_label, self.tracker_detail):
-            widget.bind("<Button-1>", self.toggle_tracker)
+        if GLOVE_TRACKER_UI:
+            glove_row = tk.Frame(sidebar,bg=PANEL)
+            glove_row.pack(fill="x",pady=(0,4))
+            label(glove_row,"글러브",10,bold=True,width=7,anchor="w").pack(side="left",padx=10,pady=7)
+            glove_detail = tk.Frame(glove_row,bg=PANEL)
+            glove_detail.pack(side="right",padx=10,pady=4)
+            self.glove_label = label(glove_detail,"MANUS 대기",9,MUTED)
+            self.glove_label.pack(anchor="e")
+            self.glove_detail = label(glove_detail,"",8,MUTED,wraplength=150,justify="right")
+            self.glove_detail.pack(anchor="e")
+            for widget in (glove_row, glove_detail, self.glove_label, self.glove_detail):
+                widget.bind("<Button-1>", self.retry_glove)
+            tracker_row = tk.Frame(sidebar,bg=PANEL,cursor="hand2")
+            tracker_row.pack(fill="x",pady=(0,4))
+            label(tracker_row,"트래커",10,bold=True,width=7,anchor="w").pack(side="left",padx=10,pady=7)
+            tracker_detail = tk.Frame(tracker_row,bg=PANEL)
+            tracker_detail.pack(side="right",padx=10,pady=4)
+            self.tracker_label = label(tracker_detail,"VIVE 대기",9,MUTED,wraplength=170,justify="right")
+            self.tracker_label.pack(anchor="e")
+            self.tracker_detail = label(tracker_detail,"",8,MUTED,wraplength=170,justify="right")
+            self.tracker_detail.pack(anchor="e")
+            for widget in (tracker_row, tracker_detail, self.tracker_label, self.tracker_detail):
+                widget.bind("<Button-1>", self.toggle_tracker)
         self.connect_button = button(sidebar,"전체 연결 종료",self.toggle_connection)
         self.connect_button.pack(fill="x",pady=(6,14))
 
@@ -201,39 +207,53 @@ class Viewer(tk.Tk):
         self.calibrate_button = button(calibration_panel, "외부 보정 실행", self.run_calibration, True)
         self.calibrate_button.pack(fill="x", pady=(4,0))
         self.update_calibration_metrics()
-        rec = tk.Frame(rec_tab,bg=PANEL)
-        rec.pack(fill="both",expand=True,padx=13,pady=12)
+        rec = self.scrollable(rec_tab)
         label(rec,"저장할 영상",10,bold=True).pack(anchor="w",pady=(0,7))
         self.selections, self.checks = {},[]
-        for camera_key, camera_name in CAMERA_NAMES.items():
+        saved_streams = self.settings.get("selected_streams", list(STREAM_NAMES))
+
+        def stream_check(row, key, caption):
+            var = tk.BooleanVar(value=key in saved_streams)
+            check = tk.Checkbutton(row, text=caption, variable=var, command=self.selection_changed, bg=PANEL,
+                                   fg=TEXT, selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT,
+                                   font=(FONT,9), anchor="w", borderwidth=0, padx=2)
+            check.pack(side="left")
+            self.selections[key] = var
+            self.checks.append(check)
+
+        rgbd_rows = [(key, name) for key, name in CAMERA_NAMES.items()]
+        rgbd_rows += [(slot, EXTRA_TITLES[f"{slot}_color"].replace(" 컬러", "")) for slot in EXTRA_GROUPS["d435"]["slots"]]
+        for camera_key, camera_name in rgbd_rows:
             row = tk.Frame(rec, bg=PANEL)
             row.pack(fill="x", pady=3)
             label(row, camera_name, 9, bold=True, width=7, anchor="w").pack(side="left")
             for kind, caption in [("color", "컬러"), ("depth", "깊이+원본")]:
-                key = f"{camera_key}_{kind}"
-                var = tk.BooleanVar(value=key in self.settings.get("selected_streams", list(STREAM_NAMES)))
-                check = tk.Checkbutton(row, text=caption, variable=var, bg=PANEL, fg=TEXT,
-                                       selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT,
-                                       font=(FONT,9), anchor="w", borderwidth=0, padx=2)
-                check.pack(side="left")
-                self.selections[key] = var
-                self.checks.append(check)
+                stream_check(row, f"{camera_key}_{kind}", caption)
+        for first in range(0, len(WEBCAM_SLOTS), 2):
+            row = tk.Frame(rec, bg=PANEL)
+            row.pack(fill="x", pady=3)
+            label(row, "4K RGB" if first == 0 else "", 9, bold=True, width=7, anchor="w").pack(side="left")
+            for slot in WEBCAM_SLOTS[first:first+2]:
+                stream_check(row, f"{slot}_color", f"{slot[-1]}번")
+        # Kept (and persisted) even while the glove / tracker UI is hidden.
         self.record_glove = tk.BooleanVar(value=bool(self.settings.get("manus_record", True)))
-        self.glove_check = tk.Checkbutton(rec, text="MANUS 글러브 함께 녹화", variable=self.record_glove,
-                                          command=self.persist, bg=PANEL, fg=TEXT, selectcolor=CARD,
-                                          activebackground=PANEL, activeforeground=TEXT, font=(FONT,9),
-                                          anchor="w", borderwidth=0, padx=2)
-        self.glove_check.pack(anchor="w", pady=(6,0))
-        self.checks.append(self.glove_check)
         self.record_tracker = tk.BooleanVar(value=bool(self.settings.get("vive_record", True)))
-        self.tracker_check = tk.Checkbutton(rec, text="VIVE 트래커 함께 녹화", variable=self.record_tracker,
-                                            command=self.persist, bg=PANEL, fg=TEXT, selectcolor=CARD,
-                                            activebackground=PANEL, activeforeground=TEXT, font=(FONT,9),
-                                            anchor="w", borderwidth=0, padx=2)
-        self.tracker_check.pack(anchor="w")
-        self.checks.append(self.tracker_check)
-        label(rec,"H.264 MP4  ·  원본 해상도  ·  무음",8,MUTED).pack(anchor="w",pady=(9,4))
-        label(rec,"깊이 MP4 + 16비트 원본 깊이 저장",8,MUTED).pack(anchor="w",pady=(0,10))
+        if GLOVE_TRACKER_UI:
+            self.glove_check = tk.Checkbutton(rec, text="MANUS 글러브 함께 녹화", variable=self.record_glove,
+                                              command=self.persist, bg=PANEL, fg=TEXT, selectcolor=CARD,
+                                              activebackground=PANEL, activeforeground=TEXT, font=(FONT,9),
+                                              anchor="w", borderwidth=0, padx=2)
+            self.glove_check.pack(anchor="w", pady=(6,0))
+            self.checks.append(self.glove_check)
+            self.tracker_check = tk.Checkbutton(rec, text="VIVE 트래커 함께 녹화", variable=self.record_tracker,
+                                                command=self.persist, bg=PANEL, fg=TEXT, selectcolor=CARD,
+                                                activebackground=PANEL, activeforeground=TEXT, font=(FONT,9),
+                                                anchor="w", borderwidth=0, padx=2)
+            self.tracker_check.pack(anchor="w")
+            self.checks.append(self.tracker_check)
+        label(rec,"선택한 카메라는 화면에 없어도 계속 켜 둡니다",8,MUTED).pack(anchor="w",pady=(6,0))
+        label(rec,"RGB-D: H.264 MP4 + 16비트 원본 깊이 (30 fps 시간축)",8,MUTED).pack(anchor="w",pady=(9,2))
+        label(rec,"4K RGB: 카메라 MJPEG 그대로 MKV (재인코딩 없음)",8,MUTED).pack(anchor="w",pady=(0,10))
         self.record_button = button(rec,"●  녹화 시작   Ctrl+R",self.toggle_recording,True)
         self.record_button.pack(fill="x")
         self.timer = label(rec,"00:00:00",26,ACCENT,True)
@@ -310,15 +330,16 @@ class Viewer(tk.Tk):
                         font=(FONT,9,"bold"),padx=10,pady=3,cursor="hand2")
             b.pack(side="left",padx=(0,3))
             self.group_buttons[group]=b
-        tk.Frame(top,bg=LINE,width=1,height=18).pack(side="left",padx=(10,0))
-        switch=tk.Frame(top,bg=BG)
-        switch.pack(side="left",padx=(10,0))
         self.layout_buttons={}
-        for mode,caption in [("cameras","카메라"),("both","카메라+글러브"),("glove","글러브 3D")]:
-            b=tk.Button(switch,text=caption,command=partial(self.set_layout,mode),relief="flat",borderwidth=0,
-                        font=(FONT,9,"bold"),padx=10,pady=3,cursor="hand2")
-            b.pack(side="left",padx=(0,3))
-            self.layout_buttons[mode]=b
+        if GLOVE_TRACKER_UI:
+            tk.Frame(top,bg=LINE,width=1,height=18).pack(side="left",padx=(10,0))
+            switch=tk.Frame(top,bg=BG)
+            switch.pack(side="left",padx=(10,0))
+            for mode,caption in [("cameras","카메라"),("both","카메라+글러브"),("glove","글러브 3D")]:
+                b=tk.Button(switch,text=caption,command=partial(self.set_layout,mode),relief="flat",borderwidth=0,
+                            font=(FONT,9,"bold"),padx=10,pady=3,cursor="hand2")
+                b.pack(side="left",padx=(0,3))
+                self.layout_buttons[mode]=b
         # Webcam capture resolution (4K RGB tab only). The dashboard always draws a 960 px / 10 fps copy.
         self.webcam_options=tk.Frame(top,bg=BG)
         label(self.webcam_options,"웹캠 캡처",9,MUTED).pack(side="left",padx=(0,6))
@@ -343,9 +364,9 @@ class Viewer(tk.Tk):
         for key,title in EXTRA_TITLES.items():
             self.panels[key]=Preview(self.views,key,lambda *_: None,self.zoom,title)
         self.glove_panel=GlovePanel(self.views)
-        self.layout_mode=self.settings.get("monitor_layout","both")
+        self.layout_mode=self.settings.get("monitor_layout","both") if GLOVE_TRACKER_UI else "cameras"
         self.apply_layout()
-        self.summary=label(content,"미리보기 최대 15fps · 녹화 목표 30fps · 영상은 이 컴퓨터에만 저장됩니다.",9,MUTED,anchor="w")
+        self.summary=label(content,"영상은 이 컴퓨터에만 저장됩니다.",9,MUTED,anchor="w")
         self.summary.pack(fill="x",pady=(10,0))
         self.footer=label(self,"카메라를 검색하고 있습니다…",9,MUTED,anchor="w",wraplength=1500,justify="left")
         self.footer.pack(fill="x",padx=22,pady=12)
@@ -549,8 +570,7 @@ class Viewer(tk.Tk):
             self.camera_errors.clear()
             self.extra_errors.clear()
             self.hub.start(self.settings.get("realsense_serials"))
-            if self.camera_group != "d405":
-                self.extras.activate(self.camera_group)
+            self.update_extra_cameras()
 
     def reassign(self):
         if self.calibrating:
@@ -574,10 +594,14 @@ class Viewer(tk.Tk):
             self.record_button.configure(text="저장 마무리 중…",state="disabled")
             return
         try:
-            keys=[k for k,v in self.selections.items() if v.get()]
-            self.recorder.start(keys,self.output_dir,sources={
-                "manus":self.glove if self.record_glove.get() else None,
-                "vive":self.tracker if self.record_tracker.get() else None})
+            selected=[k for k,v in self.selections.items() if v.get()]
+            webcams=[k.rsplit("_",1)[0] for k in selected if k.startswith("rgb4k_")]
+            keys=[k for k in selected if not k.startswith("rgb4k_")]
+            sources={"webcams":WebcamRecordingSource(self.extras,webcams) if webcams else None}
+            if GLOVE_TRACKER_UI:
+                sources.update(manus=self.glove if self.record_glove.get() else None,
+                               vive=self.tracker if self.record_tracker.get() else None)
+            self.recorder.start(keys,self.output_dir,sources=sources)
             self.persist()
             self.record_state.configure(text="인코더 준비 중…",fg=MUTED)
             self.record_button.configure(text="준비 중…",state="disabled")
@@ -611,7 +635,7 @@ class Viewer(tk.Tk):
                     if not any(frame.live for frame in self.extras.frames().values()):
                         raise
                     folder=None
-                folder=self.extras.save_snapshot(folder)  # full-resolution D435 / 4K frames of the shown group
+                folder=self.extras.save_snapshot(self.extras.wanted,folder)  # original D435 / 4K frames
                 self.ui_events.put(("snapshot",str(folder)))
             except Exception as error:
                 logging.exception("Snapshot failed")
@@ -650,6 +674,24 @@ class Viewer(tk.Tk):
         self.extras.set_webcam_size(WEBCAM_SIZES[name])
         self.footer.configure(text=f"웹캠 캡처 해상도 {name} {WEBCAM_SIZES[name][0]}×{WEBCAM_SIZES[name][1]} · 다시 연결하는 중…")
 
+    def update_extra_cameras(self):
+        """Run the D435 / webcam slots that are on screen or selected for recording; stop the rest."""
+        if self.closing:
+            return
+        slots=set(EXTRA_GROUPS[self.camera_group]["slots"]) if self.camera_group!="d405" else set()
+        slots|={key.rsplit("_",1)[0] for key,var in self.selections.items()
+                if var.get() and key.rsplit("_",1)[0] not in CAMERA_KEYS}
+        if slots!=set(self.extras.wanted):
+            self.extras.activate(slots)
+
+    def selection_changed(self):
+        self.persist()
+        self.update_extra_cameras()
+
+    def recorded_webcams(self):
+        source=self.recorder.sources.get("webcams")
+        return set(source.slots) if source else set()
+
     def set_group(self, group):
         if group == self.camera_group:
             return
@@ -658,11 +700,11 @@ class Viewer(tk.Tk):
         self.settings["camera_group"] = group
         self.persist()
         self.extra_errors.clear()
-        self.extras.activate(None if group == "d405" else group)
+        self.update_extra_cameras()
         if group != "d405":
-            self.footer.configure(text=f"{EXTRA_GROUPS[group]['title']} 카메라를 여는 중… (미리보기 전용 · 녹화에는 아직 포함되지 않습니다)")
+            self.footer.configure(text=f"{EXTRA_GROUPS[group]['title']} 카메라를 여는 중…")
         else:
-            self.footer.configure(text="D405 화면 · D435 / 4K RGB 카메라는 정지했습니다.")
+            self.footer.configure(text="D405 화면 · 녹화 선택이 없는 D435 / 4K RGB 카메라는 정지했습니다.")
         self.apply_layout()
 
     def zoom(self,key):
@@ -745,7 +787,7 @@ class Viewer(tk.Tk):
             elif event[0]=="devices" and event[1]==self.camera_group:
                 title=EXTRA_GROUPS[event[1]]["title"]
                 expected=len(EXTRA_GROUPS[event[1]]["slots"])
-                self.footer.configure(text=f"{title} {len(event[2])}/{expected}대 검색됨 · 미리보기 전용 (녹화에는 아직 포함되지 않습니다)")
+                self.footer.configure(text=f"{title} {len(event[2])}/{expected}대 검색됨")
         for slot,kind,value in self.extras.drain_errors():
             if kind=="error":
                 self.extra_errors[slot]=value
@@ -797,7 +839,8 @@ class Viewer(tk.Tk):
         frames=self.hub.frames()
         live_count=sum(bool(frames.get(f"{key}_color") and frames[f"{key}_color"].live) for key in CAMERA_KEYS)
         busy,recording=self.recorder.busy,self.recorder.recording
-        self.top_status.configure(text=f"●  REC · {len(self.recorder.tracks)}개 영상" if recording else f"●  카메라 {live_count}/3 연결",
+        recorded_webcams=self.recorded_webcams() if recording else set()
+        self.top_status.configure(text=f"●  REC · {len(self.recorder.tracks)+len(recorded_webcams)}개 영상" if recording else f"●  D405 {live_count}/3 연결",
                                   fg=RED if recording else ACCENT if live_count else MUTED)
         for key,widget in self.device_labels.items():
             frame=frames.get(f"{key}_color")
@@ -806,8 +849,9 @@ class Viewer(tk.Tk):
             camera = self.hub.cameras()[key]
             info = camera.snapshot()[1]
             self.device_details[key].configure(text=f"S/N {camera.serial or '—'} · USB {info.get('usb', '—')}")
-        self.update_glove_status(recording)
-        self.update_tracker_status(recording)
+        if GLOVE_TRACKER_UI:
+            self.update_glove_status(recording)
+            self.update_tracker_status(recording)
         self.connect_button.configure(text="전체 연결 종료" if self.hub.running else "전체 카메라 연결",state="disabled" if busy or self.closing or self.hub.scanning else "normal")
         stopping=busy and self.recorder.stop_event.is_set()
         self.record_button.configure(text="저장 마무리 중…" if stopping else "■  녹화 종료 / 저장" if recording else "준비 중…" if busy else "●  녹화 시작   Ctrl+R",
@@ -815,7 +859,7 @@ class Viewer(tk.Tk):
                                      bg=RED if recording else ACCENT)
         for widget in [*self.checks,self.folder_button,self.reassign_button]:
             widget.configure(state="disabled" if busy or self.closing else "normal")
-        for combo in self.combos:
+        for combo in [*self.combos,self.webcam_resolution]:  # resolution change would restart recording webcams
             combo.configure(state="disabled" if busy or self.closing else "readonly")
         self.snapshot_button.configure(state="disabled" if self.saving or self.closing else "normal")
         for widget in (self.verify_button, self.overlay3d_button):
@@ -845,7 +889,8 @@ class Viewer(tk.Tk):
             camera_key = key.rsplit("_", 1)[0]
             if camera_key not in CAMERA_KEYS:
                 if self.camera_group != "d405" and key in EXTRA_GROUPS[self.camera_group]["streams"]:
-                    panel.render(extra_frames.get(key), None, "", False)
+                    panel.render(extra_frames.get(key), None, "", recording and (
+                        key in self.recorder.tracks or key.rsplit("_",1)[0] in recorded_webcams))
                 continue
             overlay = None
             if self.show_calibration.get() and self.calibration and key.endswith("_color"):
@@ -885,7 +930,7 @@ class Viewer(tk.Tk):
                 parts.append(f"{name} {frame.fps:.0f} fps{usb}")
             else:
                 parts.append(f"{name} 연결 중")
-        return "  ·  ".join(parts)+"   |   미리보기 전용"
+        return "  ·  ".join(parts)
 
     def update_glove_status(self, recording):
         status = self.glove.status()

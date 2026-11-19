@@ -1,10 +1,10 @@
 # Robohand
 
-RealSense D405 RGB-D 카메라 3대, MANUS 데이터 글러브, VIVE Tracker를 **하나의 녹화 버튼과 하나의 시계**로 함께 기록하는 Windows용 손 동작 캡처 도구입니다.
+RealSense D405 × 3, D435 × 2, 4K UVC 웹캠 × 4(그리고 코드상으로는 MANUS 글러브, VIVE Tracker)를 **하나의 녹화 버튼과 하나의 시계**로 함께 기록하는 Windows용 손 동작 캡처 도구입니다.
 
 | 도구 | 실행 | 하는 일 |
 | --- | --- | --- |
-| **Camera Studio** | `Camera Studio.cmd` | 카메라 3대 미리보기와 녹화, 외부 보정, 글러브·트래커 상태 표시와 동시 녹화 |
+| **Camera Studio** | `Camera Studio.cmd` | D405 / D435 / 4K RGB 미리보기(탭 전환)와 동시 녹화, D405 외부 보정 |
 | **Depth Replay 3D** | `Depth Replay 3D.cmd` | 녹화 재생. 세 카메라의 포인트클라우드를 보드 좌표계에 겹치고, 글러브 3D 손 골격을 함께 표시 |
 | **Tracker Studio** | `Tracker Studio.cmd` | VIVE Tracker 페어링, 베이스스테이션 보정, 트래커 단독 기록(웹 UI). [자세히](tracker_studio/README.md) |
 
@@ -12,6 +12,7 @@ RealSense D405 RGB-D 카메라 3대, MANUS 데이터 글러브, VIVE Tracker를 
 
 - Windows 10/11 x64, Python 3.13 (64-bit)
 - Intel RealSense D405 × 3. USB 3 연결을 권장하며, USB 2로 연결하면 15 fps로 동작합니다.
+- 선택: RealSense D435(i) × 2, UVC MJPEG 웹캠 × 4 (OBSBOT Tiny 2 Lite로 확인). 4K 웹캠 1대는 약 150 Mbps라 USB 2 허브 하나에 여러 대를 꽂으면 fps가 떨어집니다.
 - 선택: MANUS Metaglove Pro와 [MANUS Core 3.2.1](https://www.manus-meta.com/). Core가 실행 중이어야 하며, Core에 들어 있는 `ManusSDK.dll`을 사용합니다.
 - 선택: VIVE Tracker 3.0과 Lighthouse 2.0 베이스스테이션. libsurvive를 쓰므로 SteamVR은 필요 없습니다.
 - 보정용 ChArUco 보드: 7×5, DICT_6X6_250, 사각형 25 mm, 마커 18 mm 기준
@@ -54,28 +55,31 @@ MANUS SDK가 기본 경로(`C:\Program Files\MANUS\Core 3\ManusCore`)에 없으�
 - 영상을 클릭하면 그 지점의 깊이(5×5 유효 픽셀 중앙값, 광축 방향 거리)를 표시합니다. 더블클릭은 확대/복귀, F11은 전체 화면입니다.
 - **장치·깊이** 탭에서 카메라를 일련번호로 슬롯에 배치하고, 카메라별 깊이 표시 범위를 정합니다.
 - **스냅샷 저장**(Ctrl+S)은 모든 카메라의 컬러, 깊이 원본(`.npy`/16비트 PNG), 메타데이터를 `captures/`에 저장합니다.
-- LIVE MONITOR 위의 **카메라 / 카메라+글러브 / 글러브 3D** 버튼으로 실시간 손 골격 패널을 전환합니다.
-- LIVE MONITOR 위의 **D405 × 3 / D435 × 2 / 4K RGB × 4** 버튼으로 카메라 묶음을 전환합니다. D435와 4K RGB(OBSBOT 등 UVC 웹캠, DirectShow MJPEG)는 보이는 동안만 켜지는 미리보기 전용이며 녹화에는 아직 포함되지 않습니다. 4K RGB 탭의 **웹캠 캡처**에서 4K(약 23 fps) · 1080p · 720p(30 fps)를 고르고, 화면에는 960 px · 10 fps로 줄여 표시합니다. 스냅샷은 보이는 묶음의 원본 해상도 프레임도 함께 저장합니다. OBSBOT Center가 켜져 있으면 웹캠 영상이 들어오지 않습니다.
-- 사이드바의 **글러브**와 **트래커** 줄에 수신 상태(Hz, 추적 상태, 배터리)가 표시됩니다. 줄을 클릭하면 다시 연결하거나 연결을 해제합니다.
+- LIVE MONITOR 위의 **D405 × 3 / D435 × 2 / 4K RGB × 4** 버튼으로 카메라 묶음을 전환합니다. D435와 4K RGB는 화면에 보이거나 **녹화 탭에서 선택된** 동안만 켜집니다.
+- 4K RGB(UVC 웹캠)는 PyAV로 DirectShow MJPEG를 그대로 받습니다. 탭의 **웹캠 캡처**에서 4K · 1080p · 720p(모두 30 fps)를 고르며, 화면에는 960 px · 10 fps로 줄여 표시합니다. OBSBOT Center가 켜져 있으면 웹캠 영상이 들어오지 않습니다.
+- **스냅샷 저장**은 켜져 있는 D435(컬러 PNG, 깊이 `.npy`)와 웹캠(카메라 원본 JPEG)도 함께 저장합니다.
+- MANUS 글러브와 VIVE 트래커 기능(`devices/`, 녹화 source, 3D 재생)은 코드에 남아 있지만 지금은 대시보드에서 숨겨져 있습니다. `robohand/ui/studio.py`의 `GLOVE_TRACKER_UI = True`로 되돌립니다.
 
 ### 녹화
 
-**녹화** 탭에서 저장할 스트림과 **MANUS 글러브 함께 녹화**, **VIVE 트래커 함께 녹화**를 고른 뒤 **녹화 시작**(Ctrl+R)을 누릅니다.
-글러브나 트래커를 함께 녹화하도록 선택했는데 실시간 데이터가 없으면, 녹화는 시작되지 않고 이유가 표시됩니다.
+**녹화** 탭에서 저장할 스트림(D405 1–3, D435 1–2의 컬러·깊이, 4K RGB 1–4)을 고른 뒤 **녹화 시작**(Ctrl+R)을 누릅니다.
+선택한 카메라에 실시간 영상이 없으면 녹화는 시작되지 않고 이유가 표시됩니다.
 
 | 파일 | 내용 |
 | --- | --- |
-| `d405*_color.mp4` | 컬러, H.264, 30 fps 시간축. 프레임이 빠진 곳은 직전 프레임을 반복합니다. |
-| `d405*_depth.mp4` | 깊이 색상 영상(표시 범위 기준) |
-| `d405*_depth_raw.mkv` | 컬러에 정렬된 uint16 깊이, FFV1 무손실. 미터 = 값 × `depth_scale_m`. 0과 65535는 무효값입니다. |
-| `*_timestamps.csv` | 출력 프레임별 시각, 원본 프레임 번호, 반복·미수신 여부 |
+| `d405*_color.mp4`, `d435_*_color.mp4` | 컬러, H.264, 30 fps 시간축. 프레임이 빠진 곳은 직전 프레임을 반복합니다. |
+| `d405*_depth.mp4`, `d435_*_depth.mp4` | 깊이 색상 영상(표시 범위 기준) |
+| `*_depth_raw.mkv` | 컬러에 정렬된 uint16 깊이, FFV1 무손실. 미터 = 값 × `depth_scale_m`(D405 0.1 mm, D435 1 mm). 0과 65535는 무효값입니다. |
+| `*_timestamps.csv` (RGB-D) | 출력 프레임별 시각, 원본 프레임 번호, 반복·미수신 여부 |
+| `rgb4k_N.mkv` | 웹캠 MJPEG를 재인코딩 없이 그대로 담은 MKV(가변 프레임, pts = `t_host_s` ms). 4K는 약 19 MB/s, 1080p는 약 10 MB/s |
+| `rgb4k_N_timestamps.csv` | 웹캠 프레임별 `t_host_s`(도착 시각), `t_device_s`(DirectShow 샘플 시각, 같은 시계 · 약 1.0 s 고정 오프셋), 바이트 수 |
 | `manus.jsonl` | MANUS raw(IMU와 센서 5개), ergonomics(관절 40개, 도), skeleton(25노드, m). 약 66 Hz |
 | `vive.jsonl` | 트래커 포즈(위치 m, 쿼터니언 wxyz, 광학/관성 상태). 약 250 Hz |
-| `session.json` | 장치, 내부 파라미터, 깊이 스케일, 트랙별 통계, `manus`/`vive` 요약, 경고 |
+| `session.json` | 장치, 내부 파라미터, 깊이 스케일, 트랙별 통계, `webcams`(·`manus`/`vive`) 요약, 경고 |
 | `calibration.json` | 녹화 시작 시점에 적용 중이던 외부 보정의 사본. `session.json`의 `calibration`에 요약이 들어갑니다. |
 
-**시간 동기화:** 모든 영상 프레임과 `manus.jsonl`·`vive.jsonl`의 `t_host_s`는 같은 PC의 monotonic 시계 기준이며, 세션 시작(`session.json`의 `start_monotonic_s`)부터 잰 초입니다.
-영상 프레임 `i`의 시각은 `i / 30`초입니다. 장치 간 하드웨어 동기화는 아닙니다.
+**시간 동기화:** 모든 RGB-D 영상 프레임, 웹캠 프레임(`rgb4k_N_timestamps.csv`), `manus.jsonl`·`vive.jsonl`의 `t_host_s`는 같은 PC의 monotonic 시계 기준이며, 세션 시작(`session.json`의 `start_monotonic_s`)부터 잰 초입니다.
+RGB-D 영상 프레임 `i`의 시각은 `i / 30`초이고, 웹캠은 프레임마다 시각이 기록됩니다. 장치 간 하드웨어 동기화는 아닙니다.
 원본 장치 시계도 함께 저장합니다. MANUS는 `publish_utc_ms`(UTC, 1 ms), libsurvive는 `pose_time_s`입니다.
 
 ```python
