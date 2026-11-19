@@ -22,6 +22,7 @@ CAPTURES = DATA_ROOT / "captures"
 CALIBRATIONS = DATA_ROOT / "calibrations"
 SETTINGS = DATA_ROOT / "settings.json"
 ACTIVE_CALIBRATION = DATA_ROOT / "calibration.json"
+WEBCAM_INTRINSICS = DATA_ROOT / "webcam_intrinsics.json"   # per-slot lens calibration of the UVC webcams
 LOGS = DATA_ROOT / "logs"
 
 TRACKER_STUDIO = REPO_ROOT / "tracker_studio"

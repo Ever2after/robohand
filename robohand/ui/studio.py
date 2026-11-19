@@ -16,13 +16,16 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import pyrealsense2 as rs
+
 from ..calibration.board import (BOARD_SPEC, board_spec, calibrate, load_calibration, verify_capture,
                                  verify_snapshot)
-from ..calibration.capture import capture as capture_calibration_frames
+from ..calibration.capture import capture as capture_calibration_frames, capture_extras
+from ..calibration.intrinsics import TARGET_VIEWS, IntrinsicCollector, load_store as load_webcam_intrinsics, scaled
 from ..calibration.scale import fit_scale
 from ..cameras.d405 import LUT, distance_mm
 from ..cameras.extra import (GROUPS as EXTRA_GROUPS, PREVIEW_FPS, PREVIEW_WIDTH, STREAM_TITLES as EXTRA_TITLES,
-                             WEBCAM_SIZES, WEBCAM_SLOTS, ExtraCameras, WebcamRecordingSource)
+                             WEBCAM_SIZES, WEBCAM_SLOTS, ExtraCameras, Webcam, WebcamRecordingSource, list_webcams)
 from ..cameras.hub import CAMERA_KEYS, CAMERA_NAMES, STREAM_NAMES, CameraHub
 from ..cameras.recorder import Recorder
 from ..devices.manus import ManusGlove
@@ -57,6 +60,7 @@ class Viewer(tk.Tk):
         if self.camera_group not in ("d405", *EXTRA_GROUPS):
             self.camera_group = "d405"
         self.extra_errors = {}
+        self.intrinsic_job = None   # {"slot", "stop"} while a webcam lens calibration collects views
         self.output_dir = Path(self.settings.get("recording_directory", str(RECORDINGS)))
         self.points = {key: (320, 240) for key in CAMERA_KEYS}
         self.selected_camera = CAMERA_KEYS[0]
@@ -169,6 +173,8 @@ class Viewer(tk.Tk):
         for key in CAMERA_KEYS:
             self.calibration_metrics[key] = label(calibration_panel, "", 8, TEXT, justify="left")
             self.calibration_metrics[key].pack(anchor="w", pady=(0,5))
+        self.extra_calibration_metrics = label(calibration_panel, "", 8, TEXT, justify="left", wraplength=230)
+        self.extra_calibration_metrics.pack(anchor="w", pady=(0,5))
         verify_row = tk.Frame(calibration_panel, bg=PANEL)
         verify_row.pack(fill="x", pady=(4,0))
         self.verify_button = button(verify_row, "프레임 검증", self.verify_calibration)
@@ -204,8 +210,29 @@ class Viewer(tk.Tk):
                                               bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL,
                                               activeforeground=TEXT, font=(FONT,8))
         self.fit_depth_check.pack(anchor="w")
+        self.calibrate_extras = tk.BooleanVar(value=bool(self.settings.get("calibration_include_extras", True)))
+        self.calibrate_extras_check = tk.Checkbutton(calibration_panel, text="D435 · 4K RGB도 함께 보정 (통합)",
+                                                     variable=self.calibrate_extras, bg=PANEL, fg=TEXT, selectcolor=CARD,
+                                                     activebackground=PANEL, activeforeground=TEXT, font=(FONT,8))
+        self.calibrate_extras_check.pack(anchor="w")
         self.calibrate_button = button(calibration_panel, "외부 보정 실행", self.run_calibration, True)
         self.calibrate_button.pack(fill="x", pady=(4,0))
+
+        tk.Frame(calibration_panel, bg=LINE, height=1).pack(fill="x", pady=10)
+        label(calibration_panel, "4K RGB 렌즈(내부) 보정", 9, bold=True).pack(anchor="w")
+        label(calibration_panel, "웹캠마다 한 번. 보드를 손에 들고 위치·각도를 바꿔 가며 잠깐씩 멈추면 "
+                                 f"자동으로 {TARGET_VIEWS}장을 모읍니다. 줌 고정 · 자동 추적 끄기.",
+              8, MUTED, justify="left", wraplength=230).pack(anchor="w", pady=(4,6))
+        self.intrinsic_slot = ttk.Combobox(calibration_panel, state="readonly", font=(FONT,9),
+                                           values=[EXTRA_TITLES[f"{slot}_color"] for slot in WEBCAM_SLOTS])
+        self.intrinsic_slot.current(0)
+        self.intrinsic_slot.pack(fill="x")
+        self.intrinsic_slot.bind("<<ComboboxSelected>>", lambda e: self.update_intrinsic_status())
+        self.intrinsic_status = label(calibration_panel, "", 8, MUTED, justify="left", wraplength=230)
+        self.intrinsic_status.pack(anchor="w", pady=(4,4))
+        self.intrinsic_button = button(calibration_panel, "렌즈 보정 시작", self.toggle_intrinsics)
+        self.intrinsic_button.pack(fill="x")
+        self.update_intrinsic_status()
         self.update_calibration_metrics()
         rec = self.scrollable(rec_tab)
         label(rec,"저장할 영상",10,bold=True).pack(anchor="w",pady=(0,7))
@@ -431,6 +458,14 @@ class Viewer(tk.Tk):
                 widget.configure(text=f"{CAMERA_NAMES[key]} · 재투영 RMS {pixels}\n깊이 평면 오차 중앙값 {depth}")
             else:
                 widget.configure(text=f"{CAMERA_NAMES[key]} · 검증 대기")
+        cameras = (self.calibration or {}).get("cameras", {})
+        extras = [f"{self.extra_name(key)} {camera.get('heldout_error_px', {}).get('rms', 0):.2f} px"
+                  for key, camera in cameras.items() if key not in CAMERA_KEYS]
+        failed = [f"{self.extra_name(key)} ({reason[:24]})"
+                  for key, reason in (self.calibration or {}).get("failed_cameras", {}).items()]
+        self.extra_calibration_metrics.configure(
+            text=("통합 · 검증 재투영 RMS: " + ", ".join(extras) if extras else "통합 카메라 없음 (D405만 보정됨)")
+                 + ("\n건너뜀: " + ", ".join(failed) if failed else ""))
 
     def run_calibration(self):
         if self.saving or self.closing:
@@ -444,21 +479,31 @@ class Viewer(tk.Tk):
             self.footer.configure(text=f"보드 크기를 확인하세요: {error}")
             return
         serials = self.settings.get("realsense_serials") or []
-        if len([serial for serial in serials if serial]) != len(CAMERA_KEYS):
-            self.footer.configure(text="세 카메라가 모두 배치된 상태에서 외부 보정을 실행하세요.")
+        assigned = [CAMERA_NAMES[key] for key, serial in zip(CAMERA_KEYS, serials) if serial]
+        if not assigned:
+            self.footer.configure(text="D405를 하나 이상 배치한 뒤 외부 보정을 실행하세요.")
             return
         fit_scale_enabled = self.fit_depth_scale.get()
+        include_extras = self.calibrate_extras.get()
+        if self.intrinsic_job:
+            self.footer.configure(text="렌즈 보정을 끝낸 뒤 외부 보정을 실행하세요.")
+            return
         if not messagebox.askokcancel(
                 "외부 보정 실행",
                 f"보드: 사각형 {spec['square_m']*1000:g} mm · 마커 {spec['marker_m']*1000:.2f} mm (25 : 18)\n"
-                f"Depth 스케일 추가 보정: {'사용' if fit_scale_enabled else '사용 안 함'}\n\n"
-                "실시간 연결을 잠시 끊고 카메라별 1280×720 영상 16장을 촬영합니다.\n"
-                "보드와 카메라를 움직이지 마세요. 완료되면 calibration.json을 교체하고\n"
+                f"Depth 스케일 추가 보정: {'사용' if fit_scale_enabled else '사용 안 함'}\n"
+                f"D405: {', '.join(assigned)}\n"
+                f"D435 · 4K RGB 통합: {'포함' if include_extras else '제외'}\n\n"
+                "실시간 연결을 잠시 끊고 카메라를 한 대씩 열어 16장씩 촬영합니다\n"
+                "(RealSense 1280×720, 웹캠은 현재 캡처 해상도).\n"
+                "보드와 카메라를 움직이지 마세요. 보드가 안 보이거나 렌즈 보정이 없는\n"
+                "D435·웹캠은 건너뜁니다. 완료되면 calibration.json을 교체하고\n"
                 "기존 파일은 결과 폴더에 백업합니다.", parent=self):
             return
         self.settings.pop("calibration_board_mm", None)
         self.settings.update(calibration_square_mm=spec["square_m"]*1000,
-                             calibration_fit_depth_scale=fit_scale_enabled)
+                             calibration_fit_depth_scale=fit_scale_enabled,
+                             calibration_include_extras=include_extras)
         self.persist()
         self.saving = True
         self.calibrating = True
@@ -466,15 +511,29 @@ class Viewer(tk.Tk):
         previous = self.calibration
         progress = lambda text: self.ui_events.put(("calibration_progress", text))
 
+        def name(key):
+            return CAMERA_NAMES.get(key) or EXTRA_TITLES.get(f"{key}_color", key).replace(" 컬러", "")
+
         def work():
             try:
                 self.hub.stop()
+                self.extras.stop_all()
                 self.hub.join(12)
-                if self.hub.running:
+                deadline = time.monotonic() + 12
+                while self.extras.running and time.monotonic() < deadline:
+                    time.sleep(.1)
+                if self.hub.running or self.extras.running:
                     raise RuntimeError("실시간 카메라 연결이 종료되지 않았습니다.")
                 folder = CALIBRATIONS/datetime.now().strftime("checkerboard_%Y%m%d_%H%M%S")
-                capture_calibration_frames(folder/"highres", progress=lambda key, index, count: progress(
-                    f"보정 영상 촬영 · {CAMERA_NAMES[key]} {index}/{count} · 보드를 움직이지 마세요"))
+                shot = lambda key, index, count: progress(
+                    f"보정 영상 촬영 · {name(key)} {index}/{count} · 보드를 움직이지 마세요")
+                capture_calibration_frames(folder/"highres", progress=shot)
+                if include_extras:
+                    d435 = dict(zip(EXTRA_GROUPS["d435"]["slots"], sorted(
+                        device.get_info(rs.camera_info.serial_number) for device in rs.context().query_devices()
+                        if "D435" in device.get_info(rs.camera_info.name))))
+                    webcams = {slot: (info.path, info.name) for slot, info in zip(WEBCAM_SLOTS, list_webcams())}
+                    capture_extras(folder/"highres", d435, webcams, webcam_size=self.extras.webcam_size, progress=shot)
                 progress("ChArUco 코너 검출 및 카메라 위치 계산 중…")
                 result, path = calibrate(folder/"highres", spec)
                 if fit_scale_enabled:
@@ -507,7 +566,76 @@ class Viewer(tk.Tk):
             pixels = f"{error['rms']:.2f}px" if error.get("count") else "—"
             depth = f"{median(checks):.1f}mm" if checks else "—"
             parts.append(f"{CAMERA_NAMES[key]} {pixels}/{depth}")
-        return "검증 재투영 RMS/깊이 평면 오차: " + ", ".join(parts)
+        extras = [f"{self.extra_name(key)} {camera.get('heldout_error_px', {}).get('rms', 0):.2f}px"
+                  for key, camera in result["cameras"].items() if key not in CAMERA_KEYS]
+        failed = [self.extra_name(key) for key in result.get("failed_cameras", {})]
+        return ("검증 재투영 RMS/깊이 평면 오차: " + ", ".join(parts) +
+                (" · 통합: " + ", ".join(extras) if extras else "") + (" · 건너뜀: " + ", ".join(failed) if failed else ""))
+
+    @staticmethod
+    def extra_name(key):
+        return EXTRA_TITLES.get(f"{key}_color", key).replace(" 컬러", "")
+
+    def update_intrinsic_status(self):
+        slot = WEBCAM_SLOTS[self.intrinsic_slot.current()]
+        entry = load_webcam_intrinsics().get(slot)
+        if entry:
+            device = self.extras.cameras().get(slot)
+            moved = isinstance(device, Webcam) and bool(entry.get("device_path")) and \
+                entry["device_path"].lower() != device.path.lower()
+            created = entry["created_at"][:16].replace("T", " ")
+            text = f"보정됨 · RMS {entry['rms_px']:.2f} px · {entry['views']}장 · {created}"
+            if moved:
+                text += "\n⚠ USB 경로가 바뀜: 다른 카메라일 수 있음"
+            self.intrinsic_status.configure(text=text, fg=AMBER if moved else ACCENT)
+        else:
+            self.intrinsic_status.configure(text="렌즈 보정 없음 · 통합 보정에서 이 웹캠은 건너뜁니다", fg=MUTED)
+
+    def toggle_intrinsics(self):
+        if self.intrinsic_job:
+            self.intrinsic_job["stop"].set()   # stop collecting and solve with the views so far
+            return
+        if self.recorder.busy or self.calibrating or self.closing:
+            self.footer.configure(text="녹화·외부 보정 중에는 렌즈 보정을 할 수 없습니다.")
+            return
+        try:
+            spec = board_spec(self.square_var.get())
+        except ValueError as error:
+            self.footer.configure(text=f"보드 크기를 확인하세요: {error}")
+            return
+        slot = WEBCAM_SLOTS[self.intrinsic_slot.current()]
+        stop = threading.Event()
+        self.intrinsic_job = {"slot": slot, "stop": stop}
+        self.set_group("webcam")
+        self.update_extra_cameras()
+        events = self.ui_events
+        title = self.extra_name(slot)
+
+        def work():
+            try:
+                deadline = time.monotonic() + 20
+                camera = None
+                while time.monotonic() < deadline and not stop.is_set():
+                    camera = self.extras.cameras().get(slot)
+                    if isinstance(camera, Webcam) and camera.jpeg():
+                        break
+                    time.sleep(.2)
+                else:
+                    raise RuntimeError(f"{title} 영상이 들어오지 않습니다.")
+                collector = IntrinsicCollector(slot, camera.snapshot()[1], spec)
+                last = None
+                while not stop.is_set() and not collector.done:
+                    latest = camera.jpeg()
+                    if latest and latest[1] != last:
+                        last = latest[1]
+                        events.put(("intrinsics_progress", f"{title} 렌즈 보정 · {collector.consider(latest[0])}"))
+                    time.sleep(.25)
+                events.put(("intrinsics_progress", f"{title} 렌즈 파라미터 계산 중…"))
+                events.put(("intrinsics_done", collector.calibrate()))
+            except Exception as error:
+                logging.exception("Webcam lens calibration failed")
+                events.put(("intrinsics_failed", str(error)))
+        threading.Thread(target=work, daemon=True, name="Webcam-intrinsics").start()
 
     def verify_calibration(self):
         self.capture_calibration_view(False)
@@ -681,6 +809,8 @@ class Viewer(tk.Tk):
         slots=set(EXTRA_GROUPS[self.camera_group]["slots"]) if self.camera_group!="d405" else set()
         slots|={key.rsplit("_",1)[0] for key,var in self.selections.items()
                 if var.get() and key.rsplit("_",1)[0] not in CAMERA_KEYS}
+        if self.intrinsic_job:
+            slots.add(self.intrinsic_job["slot"])
         if slots!=set(self.extras.wanted):
             self.extras.activate(slots)
 
@@ -813,6 +943,20 @@ class Viewer(tk.Tk):
             if kind == "calibration_progress":
                 self.footer.configure(text=value)
                 continue
+            if kind == "intrinsics_progress":
+                self.intrinsic_status.configure(text=value, fg=TEXT)
+                self.footer.configure(text=value)
+                continue
+            if kind in {"intrinsics_done", "intrinsics_failed"}:
+                self.intrinsic_job = None
+                self.update_extra_cameras()
+                self.update_intrinsic_status()
+                if kind == "intrinsics_done":
+                    self.footer.configure(text=f"{self.extra_name(value['slot'])} 렌즈 보정 완료 · RMS {value['rms_px']:.2f} px · "
+                                               f"{value['views']}장 · 이제 '외부 보정 실행'으로 통합 보정하세요.")
+                else:
+                    self.footer.configure(text=f"렌즈 보정 실패 · {value}")
+                continue
             self.saving=False
             if kind in {"calibration_done", "calibration_failed"}:
                 self.calibrating = False
@@ -828,6 +972,8 @@ class Viewer(tk.Tk):
                 if not self.closing:
                     self.camera_errors.clear()
                     self.hub.start(self.settings.get("realsense_serials"))
+                    self.update_extra_cameras()
+                    self.update_intrinsic_status()
             elif kind in {"calibration3d", "calibration_verified"}:
                 folder, self.validation = value
                 self.update_calibration_metrics()
@@ -868,6 +1014,10 @@ class Viewer(tk.Tk):
         for widget in (self.calibrate_button, self.fit_depth_check, *self.board_entries):
             widget.configure(state=locked)
         self.calibrate_button.configure(text="외부 보정 진행 중…" if self.calibrating else "외부 보정 실행")
+        self.intrinsic_button.configure(text="중지하고 계산" if self.intrinsic_job else "렌즈 보정 시작",
+                                        state="disabled" if self.calibrating or busy or self.closing else "normal")
+        self.intrinsic_slot.configure(state="disabled" if self.intrinsic_job else "readonly")
+        self.calibrate_extras_check.configure(state=locked)
         if self.calibrating:
             self.connect_button.configure(state="disabled")
             self.record_button.configure(state="disabled")
@@ -890,7 +1040,8 @@ class Viewer(tk.Tk):
             if camera_key not in CAMERA_KEYS:
                 if self.camera_group != "d405" and key in EXTRA_GROUPS[self.camera_group]["streams"]:
                     panel.render(extra_frames.get(key), None, "", recording and (
-                        key in self.recorder.tracks or key.rsplit("_",1)[0] in recorded_webcams))
+                        key in self.recorder.tracks or key.rsplit("_",1)[0] in recorded_webcams),
+                        self.extra_overlay(key, extra_frames.get(key)))
                 continue
             overlay = None
             if self.show_calibration.get() and self.calibration and key.endswith("_color"):
@@ -912,6 +1063,25 @@ class Viewer(tk.Tk):
                     self.destroy()
                     return
         self.after(65,self.tick)
+
+    def extra_overlay(self, key, frame):
+        """Board model projected into a D435 / webcam preview from the integrated calibration."""
+        if not (self.show_calibration.get() and self.calibration and frame is not None and key.endswith("_color")):
+            return None
+        slot = key.rsplit("_", 1)[0]
+        camera = self.calibration["cameras"].get(slot)
+        device = self.extras.cameras().get(slot)
+        if not camera or device is None:
+            return None
+        if isinstance(device, Webcam):
+            try:
+                return camera, scaled(camera["intrinsics"], (frame.image.shape[1], frame.image.shape[0]))
+            except (KeyError, ValueError):
+                return None
+        info = device.snapshot()[1]
+        if info.get("serial") == camera.get("serial") and info.get("color_intrinsics"):
+            return camera, info["color_intrinsics"]
+        return None
 
     def extra_summary(self, frames):
         parts=[]

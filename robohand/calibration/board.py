@@ -1,4 +1,7 @@
-"""Fixed-intrinsic ChArUco extrinsics and independent RGB/depth validation."""
+"""Fixed-intrinsic ChArUco extrinsics and independent RGB/depth validation.
+
+All cameras share the board frame: the three D405 (required) and, when captured, the D435s and
+UVC webcams (rgb4k_N, intrinsics from calibration/intrinsics.py)."""
 from __future__ import annotations
 
 import argparse
@@ -49,7 +52,9 @@ def detect_corners(image, spec=None):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     detector = cv2.aruco.CharucoDetector(board_model(spec))
     best = {}
-    for scale in (1, 2, 3):
+    width = gray.shape[1]
+    scales = (1,) if width >= 2500 else (1, 2) if width >= 1500 else (1, 2, 3)   # 4K: upscaling only costs time
+    for scale in scales:
         enlarged = gray if scale == 1 else cv2.resize(gray, None, fx=scale, fy=scale)
         corners, ids, _, _ = detector.detectBoard(enlarged)
         if ids is None or len(ids) <= len(best):
@@ -237,6 +242,14 @@ def draw_overlay(image, camera, intrinsics, observations=None):
     return output
 
 
+def read_color(folder, key):
+    """Colour view of `key` in a capture frame folder (RealSense PNG or webcam JPEG)."""
+    for name in (f"{key}_color.png", f"{key}_color.jpg"):
+        if (Path(folder) / name).exists():
+            return cv2.imread(str(Path(folder) / name))
+    return None
+
+
 def load_calibration(path=ACTIVE_CALIBRATION):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -275,6 +288,7 @@ def verify_snapshot(folder, calibration, output_folder=None):
 
 
 def verify_capture(folder, calibration, output_folder=None, indices=None):
+    """Re-check every calibrated camera that is present in a capture folder."""
     folder = Path(folder)
     destination = Path(output_folder) if output_folder else folder
     destination.mkdir(parents=True, exist_ok=True)
@@ -286,74 +300,105 @@ def verify_capture(folder, calibration, output_folder=None, indices=None):
     if not samples:
         raise ValueError("No validation samples selected")
     result["sample_indices"] = [sample["index"] for sample in samples]
-    for key in CAMERA_KEYS:
-        info, camera = capture["devices"][key], calibration["cameras"][key]
-        if info["serial"] != camera["serial"]:
+    for key, camera in calibration["cameras"].items():
+        info = capture["devices"].get(key)
+        if info is None:
+            continue
+        if camera.get("serial") and info.get("serial") != camera["serial"]:
             raise ValueError(f"Serial mismatch for {key}")
+        intrinsics = info.get("color_intrinsics") or camera.get("intrinsics")
         views, depth_checks = [], []
+        image = None
         for sample in samples:
             source = folder/f"frame_{sample['index']:03d}"
-            image = cv2.imread(str(source/f"{key}_color.png"))
+            image = read_color(source, key)
+            if image is None:
+                continue
             views.append(detect_corners(image, calibration["board"]))
-            depth_checks.append(depth_plane_validation(image, np.load(source/f"{key}_depth.npy"), camera, info))
+            if (source/f"{key}_depth.npy").exists():
+                depth_checks.append(depth_plane_validation(image, np.load(source/f"{key}_depth.npy"), camera, info))
         result["cameras"][key] = {
-            "serial": info["serial"], "corner_counts": [len(view) for view in views],
-            "reprojection_px": reprojection_errors(views, camera, info["color_intrinsics"]),
+            "serial": info.get("serial"), "corner_counts": [len(view) for view in views],
+            "reprojection_px": reprojection_errors(views, camera, intrinsics),
             "depth_plane_mm": depth_checks}
-        cv2.imwrite(str(destination/f"{key}_overlay.png"), draw_overlay(image, camera, info["color_intrinsics"], views[-1]))
+        if image is not None and views:
+            cv2.imwrite(str(destination/f"{key}_overlay.png"), draw_overlay(image, camera, intrinsics, views[-1]))
     (destination/"calibration_validation.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
 
 def calibrate(folder, spec=None):
+    """Board-frame pose of every captured camera. The D405s must succeed; other cameras that cannot
+    see the board (or have no intrinsics) are listed under "failed_cameras" instead of aborting."""
     folder = Path(folder).resolve()
     spec = copy.deepcopy(spec or BOARD_SPEC)
     capture = json.loads((folder/"capture.json").read_text(encoding="utf-8"))
     count = len(capture["samples"])
     split = count // 2
-    result = {"format_version": 1, "created_at": datetime.now().astimezone().isoformat(),
-              "board": spec, "intrinsics_source": "RealSense factory calibration, held fixed",
+    result = {"format_version": 2, "created_at": datetime.now().astimezone().isoformat(),
+              "board": spec, "intrinsics_source": "RealSense factory calibration (held fixed); "
+                                                  "webcams: ChArUco lens calibration (webcam_intrinsics.json)",
               "world_axes": "X along columns, Y opposite rows, Z above paper; meters",
               "capture_mode": capture.get("capture_mode"), "source_folder": str(folder),
               "training_indices": list(range(split)), "validation_indices": list(range(split, count)),
-              "cameras": {}}
+              "cameras": {}, "failed_cameras": {}}
     observations = {}
     report_folder = folder.parent / "overlays"
     report_folder.mkdir(exist_ok=True)
-    for key in CAMERA_KEYS:
+    keys = [key for key in CAMERA_KEYS if key in capture["devices"]]
+    keys += [key for key in capture["devices"] if key not in CAMERA_KEYS]
+    for key in keys:
         info = capture["devices"][key]
-        views = []
-        for index in range(count):
-            image = cv2.imread(str(folder/f"frame_{index:03d}"/f"{key}_color.png"))
-            views.append(detect_corners(image, spec))
-        observations[key] = views
-        camera = estimate_pose(views[:split], info["color_intrinsics"], spec)
+        intrinsics = info.get("color_intrinsics")
+        try:
+            if not intrinsics:
+                raise ValueError(info.get("intrinsics_note") or "내부 파라미터 없음")
+            views = []
+            for index in range(count):
+                image = read_color(folder/f"frame_{index:03d}", key)
+                views.append(detect_corners(image, spec) if image is not None else {})
+            observations[key] = views
+            camera = estimate_pose(views[:split], intrinsics, spec)
+        except ValueError as error:
+            if key in CAMERA_KEYS:
+                raise ValueError(f"{key}: {error}") from error
+            result["failed_cameras"][key] = str(error)
+            print(key, "skipped:", error, flush=True)
+            continue
         camera["board"] = copy.deepcopy(spec)
-        camera.update(serial=info["serial"], factory_intrinsics=info["color_intrinsics"],
-                      training_error_px=reprojection_errors(views[:split], camera, info["color_intrinsics"]),
-                      heldout_error_px=reprojection_errors(views[split:], camera, info["color_intrinsics"]),
+        camera.update(serial=info.get("serial"), kind=info.get("kind", "realsense"), intrinsics=intrinsics,
+                      training_error_px=reprojection_errors(views[:split], camera, intrinsics),
+                      heldout_error_px=reprojection_errors(views[split:], camera, intrinsics),
                       detected_corner_counts=[len(view) for view in views])
+        if info.get("kind", "realsense") == "realsense":
+            camera["factory_intrinsics"] = intrinsics
+        else:
+            camera.update(device_path=info.get("path"), intrinsics_note=info.get("intrinsics_note", ""))
         depth_checks = []
         for index in range(split, count):
             source = folder / f"frame_{index:03d}"
-            image = cv2.imread(str(source/f"{key}_color.png"))
-            depth_checks.append(depth_plane_validation(image, np.load(source/f"{key}_depth.npy"), camera, info))
+            if (source/f"{key}_depth.npy").exists():
+                image = read_color(source, key)
+                depth_checks.append(depth_plane_validation(image, np.load(source/f"{key}_depth.npy"), camera, info))
         camera["heldout_depth_plane_mm"] = depth_checks
         result["cameras"][key] = camera
-        image = cv2.imread(str(folder/f"frame_{count-1:03d}"/f"{key}_color.png"))
-        cv2.imwrite(str(report_folder/f"{key}_overlay.png"), draw_overlay(image, camera, info["color_intrinsics"], views[-1]))
+        image = read_color(folder/f"frame_{count-1:03d}", key)
+        cv2.imwrite(str(report_folder/f"{key}_overlay.png"), draw_overlay(image, camera, intrinsics, views[-1]))
         print(key, "corners", camera["detected_corner_counts"],
               "heldout px", camera["heldout_error_px"],
               "depth median mm", [round(check.get("median", -1), 2) for check in depth_checks], flush=True)
     result["observations"] = observations
-    result["relative_transforms"] = {
-        f"T_{target}_from_{source}": (
-            np.asarray(result["cameras"][target]["T_camera_from_board"]) @
-            np.asarray(result["cameras"][source]["T_board_from_camera"])).tolist()
-        for target in CAMERA_KEYS for source in CAMERA_KEYS if target != source}
+    result["relative_transforms"] = relative_transforms(result["cameras"])
     destination = folder.parent / "calibration.json"
     destination.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result, destination
+
+
+def relative_transforms(cameras):
+    return {f"T_{target}_from_{source}": (
+                np.asarray(cameras[target]["T_camera_from_board"]) @
+                np.asarray(cameras[source]["T_board_from_camera"])).tolist()
+            for target in cameras for source in cameras if target != source}
 
 
 def main():

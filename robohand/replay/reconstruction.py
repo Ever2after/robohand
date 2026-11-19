@@ -312,7 +312,8 @@ class MultiSequence:
             calibration, self.calibration_origin, self.calibration_path = session_calibration(self.folder, self.manifest)
         self.calibration = calibration
         # Match extrinsics by serial so a slot reassignment cannot mix up cameras.
-        by_serial = {camera.get("serial"): camera for camera in (calibration or {}).get("cameras", {}).values()}
+        by_serial = {camera["serial"]: camera for camera in (calibration or {}).get("cameras", {}).values()
+                     if camera.get("serial")}   # webcams have no serial and no depth track
         self.transforms = {}
         for key, sequence in self.sequences.items():
             camera = by_serial.get(sequence.info.get("serial"))

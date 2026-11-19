@@ -11,7 +11,7 @@ import numpy as np
 
 from ..cameras.hub import CAMERA_KEYS
 from ..paths import ACTIVE_CALIBRATION, CALIBRATIONS
-from .board import board_plane_residuals, load_calibration, reprojection_errors, verify_capture
+from .board import board_plane_residuals, load_calibration, relative_transforms, reprojection_errors, verify_capture
 
 
 def summarize(checks):
@@ -84,12 +84,8 @@ def fit_scale(calibration):
         camera["T_board_from_camera"] = inverse.tolist()
         camera["camera_center_board_m"] = inverse[:3, 3].tolist()
         views = [result["observations"][key][index] for index in indices]
-        camera["training_error_px"] = reprojection_errors(views, camera, camera["factory_intrinsics"])
-    result["relative_transforms"] = {
-        f"T_{target}_from_{source}": (
-            np.asarray(result["cameras"][target]["T_camera_from_board"]) @
-            np.asarray(result["cameras"][source]["T_board_from_camera"])).tolist()
-        for target in CAMERA_KEYS for source in CAMERA_KEYS if target != source}
+        camera["training_error_px"] = reprojection_errors(views, camera, camera.get("intrinsics") or camera["factory_intrinsics"])
+    result["relative_transforms"] = relative_transforms(result["cameras"])   # every calibrated camera
     return result
 
 
@@ -114,6 +110,8 @@ def main():
         verified = validation["cameras"][key]
         camera["heldout_error_px"] = verified["reprojection_px"]
         camera["heldout_depth_plane_mm"] = verified["depth_plane_mm"]
+        if not camera["heldout_depth_plane_mm"]:
+            continue   # webcams: no depth to compare
         comparison[key] = {"before": summarize(baseline["cameras"][key]["heldout_depth_plane_mm"]),
                            "after": summarize(camera["heldout_depth_plane_mm"])}
         print(key, comparison[key], flush=True)
