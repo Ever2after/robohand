@@ -59,6 +59,7 @@ MANUS SDK가 기본 경로(`C:\Program Files\MANUS\Core 3\ManusCore`)에 없으�
 - 4K RGB(UVC 웹캠)는 PyAV로 DirectShow MJPEG를 그대로 받습니다. 탭의 **웹캠 캡처**에서 4K · 1080p · 720p(모두 30 fps)를 고르며, 화면에는 960 px · 10 fps로 줄여 표시합니다. OBSBOT Center가 켜져 있으면 웹캠 영상이 들어오지 않습니다.
 - **스냅샷 저장**은 켜져 있는 D435(컬러 PNG, 깊이 `.npy`)와 웹캠(카메라 원본 JPEG)도 함께 저장합니다.
 - MANUS 글러브와 VIVE 트래커 기능(`devices/`, 녹화 source, 3D 재생)은 코드에 남아 있지만 지금은 대시보드에서 숨겨져 있습니다. `robohand/ui/studio.py`의 `GLOVE_TRACKER_UI = True`로 되돌립니다.
+- D435도 지금은 대시보드에서 꺼져 있습니다(탭·녹화 선택·통합 보정 촬영 제외). USB 2 연결에서는 같은 컨트롤러의 D405 대역폭을 빼앗기 때문입니다. RealSense를 USB 3로 연결한 뒤 `D435_UI = True`로 되돌립니다.
 
 ### 녹화
 

@@ -39,6 +39,10 @@ from .widgets import GlovePanel, Preview, button, label
 # but is hidden from the dashboard for now: no sidebar rows, record options, glove view or
 # auto-connect. Set True to bring it back.
 GLOVE_TRACKER_UI = False
+# D435 RGB-D pair: supported (preview, recording, integrated calibration) but switched off for now,
+# because on USB 2 links it starves the D405s sharing its controller. True brings back the tab,
+# record options and calibration capture.
+D435_UI = False
 
 
 class Viewer(tk.Tk):
@@ -57,7 +61,7 @@ class Viewer(tk.Tk):
         self.glove = ManusGlove()
         self.tracker = ViveTracker()
         self.camera_group = self.settings.get("camera_group", "d405")
-        if self.camera_group not in ("d405", *EXTRA_GROUPS):
+        if self.camera_group not in ("d405", *EXTRA_GROUPS) or (self.camera_group == "d435" and not D435_UI):
             self.camera_group = "d405"
         self.extra_errors = {}
         self.intrinsic_job = None   # {"slot", "stop"} while a webcam lens calibration collects views
@@ -103,7 +107,7 @@ class Viewer(tk.Tk):
         brand = tk.Frame(header,bg=BG)
         brand.pack(side="left")
         label(brand,"CAMERA STUDIO",20,bold=True).pack(anchor="w")
-        label(brand,"RealSense D405 × 3  ·  D435 × 2  ·  4K RGB × 4  동시 녹화",9,MUTED).pack(anchor="w",pady=(3,0))
+        label(brand,"RealSense D405 × 3" + ("  ·  D435 × 2" if D435_UI else "") + "  ·  4K RGB × 4  동시 녹화",9,MUTED).pack(anchor="w",pady=(3,0))
         self.top_status = label(header,"●  카메라 연결 준비",11,MUTED)
         self.top_status.pack(side="right")
 
@@ -211,7 +215,7 @@ class Viewer(tk.Tk):
                                               activeforeground=TEXT, font=(FONT,8))
         self.fit_depth_check.pack(anchor="w")
         self.calibrate_extras = tk.BooleanVar(value=bool(self.settings.get("calibration_include_extras", True)))
-        self.calibrate_extras_check = tk.Checkbutton(calibration_panel, text="D435 · 4K RGB도 함께 보정 (통합)",
+        self.calibrate_extras_check = tk.Checkbutton(calibration_panel, text=("D435 · 4K RGB도" if D435_UI else "4K RGB도") + " 함께 보정 (통합)",
                                                      variable=self.calibrate_extras, bg=PANEL, fg=TEXT, selectcolor=CARD,
                                                      activebackground=PANEL, activeforeground=TEXT, font=(FONT,8))
         self.calibrate_extras_check.pack(anchor="w")
@@ -250,7 +254,8 @@ class Viewer(tk.Tk):
             self.checks.append(check)
 
         rgbd_rows = [(key, name) for key, name in CAMERA_NAMES.items()]
-        rgbd_rows += [(slot, EXTRA_TITLES[f"{slot}_color"].replace(" 컬러", "")) for slot in EXTRA_GROUPS["d435"]["slots"]]
+        if D435_UI:
+            rgbd_rows += [(slot, EXTRA_TITLES[f"{slot}_color"].replace(" 컬러", "")) for slot in EXTRA_GROUPS["d435"]["slots"]]
         for camera_key, camera_name in rgbd_rows:
             row = tk.Frame(rec, bg=PANEL)
             row.pack(fill="x", pady=3)
@@ -354,6 +359,8 @@ class Viewer(tk.Tk):
         groups.pack(side="left",padx=(16,0))
         self.group_buttons={}
         for group,caption in [("d405","D405 × 3"),("d435","D435 × 2"),("webcam","4K RGB × 4")]:
+            if group=="d435" and not D435_UI:
+                continue
             b=tk.Button(groups,text=caption,command=partial(self.set_group,group),relief="flat",borderwidth=0,
                         font=(FONT,9,"bold"),padx=10,pady=3,cursor="hand2")
             b.pack(side="left",padx=(0,3))
@@ -530,7 +537,7 @@ class Viewer(tk.Tk):
                     f"보정 영상 촬영 · {name(key)} {index}/{count} · 보드를 움직이지 마세요")
                 capture_calibration_frames(folder/"highres", progress=shot)
                 if include_extras:
-                    d435 = dict(zip(EXTRA_GROUPS["d435"]["slots"], sorted(
+                    d435 = {} if not D435_UI else dict(zip(EXTRA_GROUPS["d435"]["slots"], sorted(
                         device.get_info(rs.camera_info.serial_number) for device in rs.context().query_devices()
                         if "D435" in device.get_info(rs.camera_info.name))))
                     webcams = {slot: (info.path, info.name) for slot, info in zip(WEBCAM_SLOTS, list_webcams())}
@@ -810,6 +817,8 @@ class Viewer(tk.Tk):
         slots=set(EXTRA_GROUPS[self.camera_group]["slots"]) if self.camera_group!="d405" else set()
         slots|={key.rsplit("_",1)[0] for key,var in self.selections.items()
                 if var.get() and key.rsplit("_",1)[0] not in CAMERA_KEYS}
+        if not D435_UI:
+            slots-=set(EXTRA_GROUPS["d435"]["slots"])
         if self.intrinsic_job:
             slots.add(self.intrinsic_job["slot"])
         if slots!=set(self.extras.wanted):
