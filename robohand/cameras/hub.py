@@ -17,10 +17,13 @@ import pyrealsense2 as rs
 
 from ..paths import CAPTURES
 from ..settings import read_settings
-from .d405 import Camera as D405Camera
+from .rs_process import ProcessCamera as D405Camera   # capture + recording in a worker process
 
 cv2.setNumThreads(2)
 CAMERA_KEYS = ("d405", "d405_2", "d405_3")
+# Full sensor resolution on USB 3 (colour and depth 1280x720, 30 fps); USB 2 cannot carry it,
+# so a USB 2 link falls back to 640x480 at 15 fps (usb2_fps).
+D405_PROFILE = {"resolution": (1280, 720), "usb2_resolution": (640, 480)}
 CAMERA_NAMES = {key: f"RGB-D {index}" for index, key in enumerate(CAMERA_KEYS, 1)}
 STREAM_NAMES = {
     f"{key}_{kind}": f"{CAMERA_NAMES[key]} {caption}"
@@ -68,7 +71,23 @@ class CameraHub:
             return dict(self.devices)
 
     def packets(self):
+        """Newest preview-size packets (dashboard)."""
         return {key: camera.snapshot()[0] for key, camera in self.cameras().items()}
+
+    def full_packets(self):
+        """Newest full-resolution packets of the running cameras (snapshots, calibration checks)."""
+        packets = {}
+        for key, camera in self.cameras().items():
+            try:
+                packets[key] = camera.full_packet() if camera.running else None
+            except RuntimeError:
+                logging.exception("Full-resolution frame of %s failed", key)
+                packets[key] = None
+        return packets
+
+    def set_preview_fps(self, fps):
+        for camera in self.cameras().values():
+            camera.set_preview_fps(fps)
 
     def start(self, preferred_serials=None):
         with self.lock:
@@ -110,7 +129,7 @@ class CameraHub:
                     if previous.serial == serial:
                         camera = previous
                     else:
-                        camera = D405Camera(serial)
+                        camera = D405Camera(serial, **D405_PROFILE)
                     default_far = settings.get("far_mm", 500) if key == "d405" else 2000
                     near, far = ranges.get(key, [settings.get("near_mm", 70), default_far])
                     camera.set_range(float(near)/1000, float(far)/1000)
@@ -170,7 +189,7 @@ class CameraHub:
         return {key: camera.snapshot()[1] for key, camera in self.cameras().items()}
 
     def save_snapshot(self):
-        packets = self.packets()
+        packets = self.full_packets()
         views = {key: frame for key, frame in self.frames(packets).items() if frame.live}
         if not views:
             raise RuntimeError("저장할 실시간 영상이 없습니다.")

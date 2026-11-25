@@ -31,7 +31,7 @@ from PIL import Image
 import pyrealsense2 as rs
 
 from ..paths import CAPTURES
-from .d405 import Camera as RealSenseCamera
+from .rs_process import ProcessCamera as RealSenseCamera   # capture + recording in a worker process
 from .hub import StreamFrame, new_folder
 
 D435_SLOTS = ("d435_1", "d435_2")
@@ -48,10 +48,15 @@ STREAM_TITLES = {
     **{f"rgb4k_{n}_color": f"4K RGB {n}" for n in (1, 2, 3, 4)},
 }
 D435_RANGE_M = (.2, 3.0)
+# Full sensor resolution on USB 3: native 1280x720 depth aligned to the 1920x1080 colour image (30 fps).
+# USB 2 offers neither profile, so the camera falls back to 640x480 (15 fps via usb2_fps).
+D435_PROFILE = {"resolution": (1280, 720), "color_resolution": (1920, 1080), "fps": None,
+                "usb2_resolution": (640, 480)}
 WEBCAM_SIZES = {"4K": (3840, 2160), "1080p": (1920, 1080), "720p": (1280, 720)}
 WEBCAM_FPS = 30
 PREVIEW_WIDTH = 960
 PREVIEW_FPS = 10
+RECORDING_PREVIEW_FPS = 1   # dashboard redraw / webcam preview decode rate while recording
 MKV_TIME_BASE = Fraction(1, 1000)
 
 
@@ -148,6 +153,7 @@ class Webcam:
         self.info = {"name": name, "path": path}
         self.take = None
         self.commands = queue.SimpleQueue()   # recording start/stop, executed by the capture thread
+        self.preview_fps = PREVIEW_FPS        # dashboard decode rate; lowered while recording
 
     @property
     def running(self):
@@ -247,7 +253,7 @@ class Webcam:
                         self.events.put(("error", f"녹화 기록 실패: {error}"))
                         self.take = None
                 preview = None
-                if host - last_preview >= 1 / PREVIEW_FPS:
+                if host - last_preview >= 1 / self.preview_fps:
                     last_preview = host
                     small = reduced_decode(jpeg, width)
                     if small is not None:
@@ -331,6 +337,16 @@ class ExtraCameras:
         self.switching = threading.Lock()
         self.generation = 0
         self.webcam_size = WEBCAM_SIZES["4K"]
+        self.preview_fps = PREVIEW_FPS
+
+    def set_preview_fps(self, fps):
+        """Dashboard preview decode rate of the webcams (recording is unaffected)."""
+        self.preview_fps = fps
+        for camera in self.cameras().values():
+            if isinstance(camera, Webcam):
+                camera.preview_fps = fps
+            else:
+                camera.set_preview_fps(fps)
 
     def set_webcam_size(self, size):
         """Capture resolution of the webcams; restarts the running ones."""
@@ -417,7 +433,7 @@ class ExtraCameras:
                 if isinstance(previous, RealSenseCamera) and previous.serial == serial:
                     found[slot] = previous
                     continue
-                camera = RealSenseCamera(serial, model="D435")
+                camera = RealSenseCamera(serial, model="D435", **D435_PROFILE)
                 camera.set_range(*D435_RANGE_M)
                 camera.usb2_fps = 15
                 found[slot] = camera
@@ -428,6 +444,7 @@ class ExtraCameras:
                     found[slot] = previous
                 else:
                     found[slot] = Webcam(info.path, info.name, self.webcam_size)
+                    found[slot].preview_fps = self.preview_fps
         return found
 
     def frames(self):
@@ -483,7 +500,11 @@ class ExtraCameras:
                     written[f"{slot}_color"] = {"frame_number": latest[1], "file": f"{slot}_color.jpg",
                                                 "resolution": camera.snapshot()[1].get("resolution")}
             elif isinstance(camera, RealSenseCamera):
-                packet = camera.snapshot()[0]
+                try:
+                    packet = camera.full_packet() if camera.running else None
+                except RuntimeError:
+                    logging.exception("Full-resolution frame of %s failed", slot)
+                    packet = None
                 if packet and now - packet.received_at < 2:
                     folder = folder or new_folder(CAPTURES)
                     Image.fromarray(packet.color).save(folder / f"{slot}_color.png")

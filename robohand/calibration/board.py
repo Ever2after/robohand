@@ -342,6 +342,8 @@ def calibrate(folder, spec=None):
               "capture_mode": capture.get("capture_mode"), "source_folder": str(folder),
               "training_indices": list(range(split)), "validation_indices": list(range(split, count)),
               "cameras": {}, "failed_cameras": {}}
+    # Cameras that could not even be captured (no video, device busy) are reported as skipped too.
+    result["failed_cameras"].update({key: f"촬영 실패: {error}" for key, error in capture.get("extra_failures", {}).items()})
     observations = {}
     report_folder = folder.parent / "overlays"
     report_folder.mkdir(exist_ok=True)

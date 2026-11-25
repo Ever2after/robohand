@@ -39,7 +39,7 @@ def latest_recording():
             except (OSError, ValueError):
                 continue
     if not candidates:
-        raise FileNotFoundError("D405 깊이 영상이 포함된 완료된 녹화를 찾을 수 없습니다.")
+        raise FileNotFoundError("깊이 영상(D405·D435)이 포함된 완료된 녹화를 찾을 수 없습니다.")
     return max(candidates, key=lambda item: item[0])[1]
 
 
@@ -184,7 +184,7 @@ class DepthSequence:
             raise ValueError("녹화가 완료된 세션을 선택하세요.")
         self.camera_keys = [key.rsplit("_", 1)[0] for key in self.manifest.get("tracks", {}) if key.endswith("_depth")]
         if not self.camera_keys:
-            raise ValueError("이 녹화에는 D405 깊이 영상이 없습니다.")
+            raise ValueError("이 녹화에는 깊이 영상(D405·D435)이 없습니다.")
         self.camera_key = camera_key or self.camera_keys[0]
         self.track = self.manifest["tracks"].get(f"{self.camera_key}_depth")
         if not self.track:

@@ -169,7 +169,7 @@ class DepthPlayer(QtWidgets.QMainWindow):
         layout.addWidget(self.apply)
         form=QtWidgets.QFormLayout()
         self.coloring=QtWidgets.QComboBox()
-        self.coloring.addItems(["D405 컬러","깊이 색상","카메라별 색상"])
+        self.coloring.addItems(["카메라 컬러","깊이 색상","카메라별 색상"])
         self.coloring.currentIndexChanged.connect(self.recolor)
         form.addRow("점 색상",self.coloring)
         self.quality=QtWidgets.QComboBox()
@@ -478,7 +478,7 @@ class DepthPlayer(QtWidgets.QMainWindow):
                 origin=CALIBRATION_ORIGINS.get(sequence.calibration_origin,"지정한 보정")
                 source=sequence.calibration_path
                 where=f"{source.parent.name}/{source.name}" if source else "calibration.json"
-                notes.append(f"외부 보정: {origin} · {where} ({created}). 세 카메라를 보드 좌표계(Z 위쪽)에 겹쳐 표시합니다. "
+                notes.append(f"외부 보정: {origin} · {where} ({created}). 보정된 카메라를 보드 좌표계(Z 위쪽)에 겹쳐 표시합니다. "
                              "카메라 간 동기화는 하드웨어가 아닌 컴퓨터 시계 기준입니다.")
                 if sequence.calibration_origin=="active":
                     notes.append("⚠ 이 녹화 이전에 만든 보정을 찾지 못해 현재 보정을 사용합니다. 카메라를 옮긴 뒤라면 구름이 어긋납니다.")

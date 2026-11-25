@@ -34,10 +34,11 @@ def supported_fps(serial, resolution, minimum=5):
     return min((rate for rate in common if rate >= minimum), default=max(common))
 
 
-def capture(folder, count=16, resolution=(1280, 720), fps=5, progress=None):
+def capture(folder, count=16, resolution=(1280, 720), fps=5, progress=None, serials=None):
+    """`serials`: D405 serial per CAMERA_KEYS slot (default: the settings); None entries are skipped."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    serials = read_settings()["realsense_serials"]
+    serials = read_settings()["realsense_serials"] if serials is None else serials
     cameras = {key: Camera(serial, resolution=resolution, fps=fps)
                for key,serial in zip(CAMERA_KEYS, serials) if serial}   # unassigned slot: skip, never "any D405"
     metadata = {"captured_at": datetime.now().astimezone().isoformat(),

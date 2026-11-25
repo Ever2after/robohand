@@ -46,7 +46,9 @@ def verify(seconds=5):
             assert session["status"]=="complete",session
             report={"folder":str(recorder.folder),"duration_s":session["duration_s"],"tracks":{}}
             for key,track in session["tracks"].items():
-                cap=cv2.VideoCapture(str(recorder.folder/track["file"]))
+                path=str(recorder.folder/track["file"])   # depth tracks: the uint16 FFV1 file itself
+                cap=(cv2.VideoCapture(path,cv2.CAP_FFMPEG,[cv2.CAP_PROP_CONVERT_RGB,0])
+                     if key.endswith("_depth") else cv2.VideoCapture(path))
                 assert cap.isOpened(),key
                 count=0
                 shape=None

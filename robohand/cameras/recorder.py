@@ -7,6 +7,7 @@ import csv
 import json
 import logging
 import math
+import os
 from pathlib import Path
 import queue
 import shutil
@@ -27,14 +28,48 @@ def stream_name(key):
     return STREAM_NAMES.get(key) or EXTRA_TITLES.get(key) or key
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# Encoders are buffered (track queue + pipe), so they run below normal priority: capture threads, which
+# must not miss frames, win the CPU whenever both are ready. Average throughput is unaffected.
+ENCODER_FLAGS = NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+X264 = ("H.264 (x264)", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2", "-pix_fmt", "yuv420p"])
+AMF = ("H.264 (AMF)", ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22",
+                       "-pix_fmt", "nv12"])
+_h264 = None
+_h264_lock = threading.Lock()
+
+
+def h264_encoder():
+    """(label, ffmpeg arguments) for the colour MP4s. The GPU encoder (AMD AMF) when this
+    machine has one: a full rig is ten simultaneous H.264 streams, which x264 cannot sustain next to the
+    capture work. Probed once per process with a one-frame encode."""
+    global _h264
+    with _h264_lock:   # tracks start their encoders concurrently; probe only once
+        if _h264 is None:
+            choice = X264
+            forced = os.environ.get("ROBOHAND_H264", "").lower()   # "x264" / "amf": skip the probe
+            if forced in ("x264", "amf"):
+                _h264 = X264 if forced == "x264" else AMF
+                return _h264
+            try:
+                probe = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
+                                        "-f", "lavfi", "-i", "color=black:s=256x144:r=30", "-frames:v", "3",
+                                        *AMF[1], "-f", "null", "-"],
+                                       capture_output=True, timeout=20, creationflags=NO_WINDOW)
+                if probe.returncode == 0:
+                    choice = AMF
+            except (OSError, subprocess.SubprocessError):
+                logging.exception("H.264 encoder probe failed")
+            _h264 = choice
+    return _h264
 
 
 class TrackWriter:
     """Bounded queue; gaps repeat the last frame to preserve the real timeline."""
+    remote = False
     def __init__(self, key, initial, folder, start, fps, failed):
         self.key, self.initial, self.folder = key, initial, folder
         self.start, self.fps, self.failed = start, fps, failed
-        self.queue = queue.Queue(maxsize=8)
+        self.queue = queue.Queue(maxsize=16)   # ~0.5 s at 30 fps: rides out short encoder stalls
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"Encode-{key}")
         self.frames_written = self.duplicates = self.missing = self.queue_dropped = 0
         self.error = None
@@ -67,25 +102,31 @@ class TrackWriter:
         raw_process = raw_stderr = None
         raw_name = None
         try:
-            h,w = self.initial.image.shape[:2]
-            output = self.folder / f"{self.key}.mp4"
-            stderr = (self.folder / f"{self.key}_encoder.log").open("wb")
-            command = [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
-                       "-f", "rawvideo", "-pixel_format", "bgr24", "-video_size", f"{w}x{h}",
-                       "-framerate", str(self.fps), "-i", "pipe:0", "-an", "-c:v", "libx264",
-                       "-preset", "veryfast", "-crf", "20", "-threads", "2", "-pix_fmt", "yuv420p",
-                       "-movflags", "+faststart", str(output)]
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                       stderr=stderr, creationflags=NO_WINDOW)
-            if self.key.endswith("_depth") and self.initial.raw_depth is not None:
+            # A depth track is only the lossless uint16 depth. There is no colorized depth video: it cost
+            # about as much CPU as all the capture work. Every other track is an H.264 MP4.
+            depth_only = self.key.endswith("_depth") and self.initial.raw_depth is not None
+            if depth_only:
+                rh,rw = self.initial.raw_depth.shape[:2]
+            else:
+                h,w = self.initial.image.shape[:2]
+                output = self.folder / f"{self.key}.mp4"
+                stderr = (self.folder / f"{self.key}_encoder.log").open("wb")
+                codec, encoder = h264_encoder()
+                command = [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+                           "-f", "rawvideo", "-pixel_format", "bgr24", "-video_size", f"{w}x{h}",
+                           "-framerate", str(self.fps), "-i", "pipe:0", "-an", *encoder,
+                           "-movflags", "+faststart", str(output)]
+                process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                           stderr=stderr, creationflags=ENCODER_FLAGS)
+            if depth_only:
                 raw_name = f"{self.key}_raw.mkv"
                 raw_stderr = (self.folder / f"{self.key}_raw_encoder.log").open("wb")
                 raw_command = [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
-                               "-f", "rawvideo", "-pixel_format", "gray16le", "-video_size", f"{w}x{h}",
+                               "-f", "rawvideo", "-pixel_format", "gray16le", "-video_size", f"{rw}x{rh}",
                                "-framerate", str(self.fps), "-i", "pipe:0", "-an", "-c:v", "ffv1",
                                "-level", "3", "-threads", "2", "-pix_fmt", "gray16le", str(self.folder/raw_name)]
                 raw_process = subprocess.Popen(raw_command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                               stderr=raw_stderr, creationflags=NO_WINDOW)
+                                               stderr=raw_stderr, creationflags=ENCODER_FLAGS)
             self.ready.set()
             with (self.folder / f"{self.key}_timestamps.csv").open("w", newline="", encoding="utf-8") as csvfile:
                 rows = csv.writer(csvfile)
@@ -95,37 +136,38 @@ class TrackWriter:
                 previous = self.initial
                 cached_number, cached_bytes = None, None
                 cached_raw_number, cached_raw_bytes = None, None
-                raw_blank = np.zeros((h,w), dtype=np.uint16).tobytes() if raw_process else None
-                blank = np.zeros((h,w,3), dtype=np.uint8)
-                cv2.putText(blank, "CAMERA DISCONNECTED", (24, max(50,h//2)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1 if w<1000 else 2, (80,80,235), 2)
-                blank_bytes = blank.tobytes()
+                raw_blank = np.zeros((rh,rw), dtype=np.uint16).tobytes() if raw_process else None
+                if process:
+                    blank = np.zeros((h,w,3), dtype=np.uint8)
+                    cv2.putText(blank, "CAMERA DISCONNECTED", (24, max(50,h//2)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1 if w<1000 else 2, (80,80,235), 2)
+                    blank_bytes = blank.tobytes()
                 def emit(frame, index):
                     nonlocal cached_number, cached_bytes
                     nonlocal cached_raw_number, cached_raw_bytes
                     unavailable = not frame.live
                     identity = (frame.number, frame.received_at)
                     repeated = identity == self.last_id
-                    if unavailable:
-                        data = blank_bytes
-                    elif cached_number != identity:
-                        image = frame.image if frame.bgr else cv2.cvtColor(frame.image, cv2.COLOR_RGB2BGR)
-                        if image.shape[:2] != (h,w):
-                            raise RuntimeError("녹화 중 영상 해상도가 변경됐습니다.")
-                        cached_bytes, cached_number = image.tobytes(), identity
-                        data = cached_bytes
-                    else:
-                        data = cached_bytes
-                    process.stdin.write(data)
+                    if process and unavailable:
+                        process.stdin.write(blank_bytes)
+                    elif process:
+                        if cached_number != identity:
+                            image = frame.image if frame.bgr else cv2.cvtColor(frame.image, cv2.COLOR_RGB2BGR)
+                            if image.shape[:2] != (h,w):
+                                raise RuntimeError("녹화 중 영상 해상도가 변경됐습니다.")
+                            # Arrays go to the pipe through the buffer protocol: no per-frame copy under
+                            # the GIL (camera frames are never modified after they are published).
+                            cached_bytes, cached_number = np.ascontiguousarray(image), identity
+                        process.stdin.write(cached_bytes)
                     if raw_process:
                         if unavailable:
                             raw_data = raw_blank
                         elif frame.raw_depth is None:
                             raise RuntimeError("프레임의 원본 깊이가 없습니다. 녹화를 중지합니다.")
                         elif cached_raw_number != identity:
-                            if frame.raw_depth.dtype != np.uint16 or frame.raw_depth.shape != (h,w):
+                            if frame.raw_depth.dtype != np.uint16 or frame.raw_depth.shape != (rh,rw):
                                 raise RuntimeError("원본 깊이 형식이 올바르지 않습니다.")
-                            cached_raw_bytes = frame.raw_depth.astype("<u2", copy=False).tobytes()
+                            cached_raw_bytes = np.ascontiguousarray(frame.raw_depth.astype("<u2", copy=False))
                             cached_raw_number = identity
                             raw_data = cached_raw_bytes
                         else:
@@ -148,22 +190,24 @@ class TrackWriter:
                     if self.frames_written == index:
                         emit(frame, index)
                     previous = frame
-            process.stdin.close()
-            if raw_process:
-                raw_process.stdin.close()
-            if process.wait(timeout=30) != 0:
+            for encoder in (process, raw_process):
+                if encoder:
+                    encoder.stdin.close()
+            if process and process.wait(timeout=30) != 0:
                 raise RuntimeError(f"{self.key} MP4 인코더 오류. 저장 폴더의 로그를 확인하세요.")
             if raw_process and raw_process.wait(timeout=30) != 0:
                 raise RuntimeError("16비트 원본 깊이 인코더 오류. 저장 폴더의 로그를 확인하세요.")
+            if depth_only:
+                output, (w,h), codec = self.folder/raw_name, (rw,rh), "FFV1 (uint16)"
             if output.stat().st_size < 1024:
                 raise RuntimeError(f"{self.key} 녹화 파일을 생성하지 못했습니다.")
             self.stats = {"file": output.name, "camera_key": self.key.rsplit("_", 1)[0],
-                          "resolution": [w,h], "codec": "H.264", "fps": self.fps,
+                          "resolution": [w,h], "codec": codec, "fps": self.fps,
                           "frames": self.frames_written, "duration_s": self.frames_written/self.fps,
                           "repeated_frames": self.duplicates, "unavailable_frames": self.missing,
                           "queue_dropped_samples": self.queue_dropped, "bytes": output.stat().st_size}
             if raw_name:
-                self.stats.update(raw_depth_file=raw_name, raw_depth_codec="FFV1",
+                self.stats.update(raw_depth_file=raw_name, raw_depth_codec="FFV1", raw_depth_resolution=[rw,rh],
                                   raw_depth_dtype="uint16", raw_depth_alignment="color",
                                   raw_depth_bytes=(self.folder/raw_name).stat().st_size)
         except Exception as error:
@@ -186,6 +230,45 @@ class TrackWriter:
             for logfile in [stderr,raw_stderr]:
                 if logfile:
                     logfile.close()
+
+
+class RemoteTrack:
+    """Stand-in for a TrackWriter whose encoders run in the camera's worker process: the recorder's
+    timeline loop skips it, and finish() collects the worker's statistics (once per camera)."""
+    remote = True
+
+    def __init__(self, camera, key, shared):
+        self.camera, self.key, self.shared = camera, key, shared
+        self.ready = threading.Event()
+        self.ready.set()
+        self.thread = self   # join() below
+        self.start = None
+        self.frames_written = self.duplicates = self.missing = self.queue_dropped = 0
+        self.error, self.stats = None, {}
+
+    def start_worker(self):
+        pass
+
+    def submit(self, index, frame):
+        pass
+
+    def finish(self, count):
+        if "result" not in self.shared:
+            try:
+                self.shared["result"] = self.camera.end_recording(count) or {}
+            except Exception as error:
+                logging.exception("Remote recording end failed")
+                self.shared["result"] = {}
+                self.shared["error"] = str(error)
+        result = self.shared["result"].get(self.key)
+        if result is None:
+            self.error = self.shared.get("error") or "카메라 프로세스에서 트랙 결과를 받지 못했습니다."
+            return
+        self.stats, self.error = result["stats"], result["error"]
+        self.missing, self.frames_written = result["missing"], result["frames_written"]
+
+    def join(self, timeout=None):
+        pass
 
 
 class Recorder:
@@ -254,11 +337,11 @@ class Recorder:
             if shutil.disk_usage(parent).free < 512*1024*1024:
                 raise RuntimeError("녹화 저장 공간이 부족합니다. 512 MB 이상 확보하세요.")
             self.folder = new_folder(parent)
-            manifest = {"format_version": 3, "status": "recording", "started_at": datetime.now().astimezone().isoformat(),
+            manifest = {"format_version": 4, "status": "recording", "started_at": datetime.now().astimezone().isoformat(),
                         "output_fps": fps, "audio": False, "devices": self._metadata(),
                         "selected_streams": keys,
                         "timing": "Common host monotonic clock; nearest latest sample, repeat gaps; not hardware synchronized",
-                        "depth_video": "Colorized MP4 plus lossless uint16 FFV1 sidecar for 3D replay",
+                        "depth_video": "Lossless uint16 FFV1 only (<camera>_depth_raw.mkv); no colorized depth video",
                         "depth_display_range_m": list(frames["d405_depth"].depth_range)
                                                  if "d405_depth" in frames and frames["d405_depth"].depth_range else None,
                         "depth_display_ranges_m": {key.rsplit("_", 1)[0]: list(frames[key].depth_range)
@@ -270,7 +353,22 @@ class Recorder:
             self._manifest(manifest)
             # Encoders initialize without camera locks; capture continues independently.
             start = time.monotonic()
-            self.tracks = {k: TrackWriter(k, frames[k], self.folder, start, fps, self._failed) for k in keys}
+            # Cameras running in their own process record their streams there (see rs_process);
+            # everything else is encoded here.
+            remote = {}
+            for key in keys:
+                camera = self._camera(key)
+                if hasattr(camera, "prepare_recording"):
+                    remote.setdefault(camera, []).append(key)
+            remote_keys = {key for group in remote.values() for key in group}
+            self.tracks = {k: TrackWriter(k, frames[k], self.folder, start, fps, self._failed)
+                           for k in keys if k not in remote_keys}
+            for camera, camera_keys in remote.items():
+                camera.prepare_recording(self.folder, camera_keys, fps, self._failed)
+                shared = {}
+                for key in camera_keys:
+                    self.tracks[key] = RemoteTrack(camera, key, shared)
+            self.tracks = {key: self.tracks[key] for key in keys}   # selection order
             for track in self.tracks.values():
                 track.start_worker()
             for track in self.tracks.values():
@@ -282,6 +380,8 @@ class Recorder:
             manifest["start_monotonic_s"] = self.started_at
             for track in self.tracks.values():
                 track.start = self.started_at
+            for camera in remote:
+                camera.begin_recording(self.started_at)
             for source in self.sources.values():
                 source.begin(self.folder, self.started_at)
             self.recording = True
@@ -299,7 +399,7 @@ class Recorder:
                             frame = StreamFrame(old.image, old.bgr, old.number, old.received_at,
                                                 old.captured_at, 0, False)
                         track.submit(index, frame)
-                        if index-track.frames_written > fps*5:
+                        if not track.remote and index-track.frames_written > fps*5:
                             raise RuntimeError("인코더가 녹화 속도를 따라가지 못해 녹화를 종료합니다.")
                     last_index = index
                 if index % (fps*5) == 0 and shutil.disk_usage(parent).free < 100*1024*1024:
@@ -367,6 +467,13 @@ class Recorder:
                 "serials": sorted(camera.get("serial") for camera in calibration.get("cameras", {}).values()
                                   if camera.get("serial")),
                 "note": "Copy of the active calibration at record start; replay uses it for extrinsics"}
+
+    def _camera(self, key):
+        slot = key.rsplit("_", 1)[0]
+        camera = self.hub.cameras().get(slot)
+        if camera is None and self.extras is not None:
+            camera = self.extras.cameras().get(slot)
+        return camera
 
     def _frames(self):
         frames = self.hub.frames()

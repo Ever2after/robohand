@@ -24,7 +24,7 @@ from ..calibration.capture import capture as capture_calibration_frames, capture
 from ..calibration.intrinsics import TARGET_VIEWS, IntrinsicCollector, load_store as load_webcam_intrinsics, scaled
 from ..calibration.scale import fit_scale
 from ..cameras.d405 import LUT, distance_mm
-from ..cameras.extra import (GROUPS as EXTRA_GROUPS, PREVIEW_FPS, PREVIEW_WIDTH, STREAM_TITLES as EXTRA_TITLES,
+from ..cameras.extra import (GROUPS as EXTRA_GROUPS, PREVIEW_FPS, RECORDING_PREVIEW_FPS, PREVIEW_WIDTH, STREAM_TITLES as EXTRA_TITLES,
                              WEBCAM_SIZES, WEBCAM_SLOTS, ExtraCameras, Webcam, WebcamRecordingSource, list_webcams)
 from ..cameras.hub import CAMERA_KEYS, CAMERA_NAMES, STREAM_NAMES, CameraHub
 from ..cameras.recorder import Recorder
@@ -39,10 +39,10 @@ from .widgets import GlovePanel, Preview, button, label
 # but is hidden from the dashboard for now: no sidebar rows, record options, glove view or
 # auto-connect. Set True to bring it back.
 GLOVE_TRACKER_UI = False
-# D435 RGB-D pair: supported (preview, recording, integrated calibration) but switched off for now,
-# because on USB 2 links it starves the D405s sharing its controller. True brings back the tab,
-# record options and calibration capture.
-D435_UI = False
+# D435 RGB-D pair: tab, record options and integrated-calibration capture. On USB 3 it runs at full
+# resolution (D435_PROFILE); on USB 2 links it falls back to 640x480 and starves D405s sharing its
+# controller, so set False there.
+D435_UI = True
 
 
 class Viewer(tk.Tk):
@@ -66,7 +66,9 @@ class Viewer(tk.Tk):
         self.extra_errors = {}
         self.intrinsic_job = None   # {"slot", "stop"} while a webcam lens calibration collects views
         self.output_dir = Path(self.settings.get("recording_directory", str(RECORDINGS)))
-        self.points = {key: (320, 240) for key in CAMERA_KEYS}
+        self.points = {key: None for key in CAMERA_KEYS}   # clicked depth pixel; None = image centre
+        self.preview_reduced = False
+        self.last_preview_draw = 0.0
         self.selected_camera = CAMERA_KEYS[0]
         self.focused = None
         self.closing = self.saving = self.calibrating = False
@@ -260,7 +262,7 @@ class Viewer(tk.Tk):
             row = tk.Frame(rec, bg=PANEL)
             row.pack(fill="x", pady=3)
             label(row, camera_name, 9, bold=True, width=7, anchor="w").pack(side="left")
-            for kind, caption in [("color", "컬러"), ("depth", "깊이+원본")]:
+            for kind, caption in [("color", "컬러"), ("depth", "깊이(원본)")]:
                 stream_check(row, f"{camera_key}_{kind}", caption)
         for first in range(0, len(WEBCAM_SLOTS), 2):
             row = tk.Frame(rec, bg=PANEL)
@@ -486,13 +488,26 @@ class Viewer(tk.Tk):
         except ValueError as error:
             self.footer.configure(text=f"보드 크기를 확인하세요: {error}")
             return
-        serials = self.settings.get("realsense_serials") or []
-        assigned = [CAMERA_NAMES[key] for key, serial in zip(CAMERA_KEYS, serials) if serial]
-        if not assigned:
-            self.footer.configure(text="D405를 하나 이상 배치한 뒤 외부 보정을 실행하세요.")
+        try:
+            connected = {device.get_info(rs.camera_info.serial_number): device.get_info(rs.camera_info.name)
+                         for device in rs.context().query_devices()}
+        except RuntimeError as error:
+            self.footer.configure(text=f"RealSense 장치 목록을 읽지 못했습니다: {error}")
             return
+        # Only D405s that are assigned *and* plugged in are captured; the rest are listed as skipped.
+        serials = [serial if serial in connected else None
+                   for serial in (self.settings.get("realsense_serials") or [None] * len(CAMERA_KEYS))]
+        assigned = [CAMERA_NAMES[key] for key, serial in zip(CAMERA_KEYS, serials) if serial]
+        unplugged = [CAMERA_NAMES[key] for key, serial in zip(CAMERA_KEYS, self.settings.get("realsense_serials") or [])
+                     if serial and serial not in connected]
         fit_scale_enabled = self.fit_depth_scale.get()
         include_extras = self.calibrate_extras.get()
+        d435_connected = D435_UI and any("D435" in name for name in connected.values())
+        if not assigned and not (include_extras and (d435_connected or list_webcams())):
+            self.footer.configure(text="연결된 D405가 없습니다. D405를 배치하거나 'D435 · 4K RGB도 함께 보정'을 켜세요.")
+            return
+        if not assigned and fit_scale_enabled:
+            fit_scale_enabled = False   # the depth-scale fit is defined on the D405s
         if self.intrinsic_job:
             self.footer.configure(text="렌즈 보정을 끝낸 뒤 외부 보정을 실행하세요.")
             return
@@ -500,7 +515,8 @@ class Viewer(tk.Tk):
                 "외부 보정 실행",
                 f"보드: 사각형 {spec['square_m']*1000:g} mm · 마커 {spec['marker_m']*1000:.2f} mm (25 : 18)\n"
                 f"Depth 스케일 추가 보정: {'사용' if fit_scale_enabled else '사용 안 함'}\n"
-                f"D405: {', '.join(assigned)}\n"
+                f"D405: {', '.join(assigned) or '없음'}"
+                + (f" (연결 안 됨, 건너뜀: {', '.join(unplugged)})" if unplugged else "") + "\n"
                 f"D435 · 4K RGB 통합: {'포함' if include_extras else '제외'}\n\n"
                 "실시간 연결을 잠시 끊고 카메라를 한 대씩 열어 16장씩 촬영합니다\n"
                 "(RealSense 1280×720, 웹캠은 현재 캡처 해상도).\n"
@@ -535,7 +551,7 @@ class Viewer(tk.Tk):
                 folder = CALIBRATIONS/datetime.now().strftime("checkerboard_%Y%m%d_%H%M%S")
                 shot = lambda key, index, count: progress(
                     f"보정 영상 촬영 · {name(key)} {index}/{count} · 보드를 움직이지 마세요")
-                capture_calibration_frames(folder/"highres", progress=shot)
+                capture_calibration_frames(folder/"highres", progress=shot, serials=serials)
                 if include_extras:
                     d435 = {} if not D435_UI else dict(zip(EXTRA_GROUPS["d435"]["slots"], sorted(
                         device.get_info(rs.camera_info.serial_number) for device in rs.context().query_devices()
@@ -568,7 +584,9 @@ class Viewer(tk.Tk):
     def calibration_summary(self, result):
         parts = []
         for key in CAMERA_KEYS:
-            camera = result["cameras"][key]
+            camera = result["cameras"].get(key)
+            if camera is None:
+                continue
             error = camera.get("heldout_error_px", {})
             checks = [check["median"] for check in camera.get("heldout_depth_plane_mm", []) if check.get("count")]
             pixels = f"{error['rms']:.2f}px" if error.get("count") else "—"
@@ -788,6 +806,14 @@ class Viewer(tk.Tk):
         self.near_var.set(f"{camera.near*1000:g}")
         self.far_var.set(f"{camera.far*1000:g}")
 
+    def point(self, camera_key, raw):
+        """Depth readout pixel of a camera: the clicked one, or the image centre (any resolution)."""
+        if raw is None:
+            return self.points[camera_key] or (0, 0)
+        height, width = raw.depth.shape[:2]
+        x, y = self.points[camera_key] or (width//2, height//2)
+        return min(max(0, x), width-1), min(max(0, y), height-1)
+
     def select_point(self,camera_key,x,y):
         self.points[camera_key]=(x,y)
         self.depth_camera.set(CAMERA_NAMES[camera_key])
@@ -812,8 +838,8 @@ class Viewer(tk.Tk):
 
     def update_extra_cameras(self):
         """Run the D435 / webcam slots that are on screen or selected for recording; stop the rest."""
-        if self.closing:
-            return
+        if self.closing or self.calibrating:
+            return   # calibration opens the cameras itself; previews resume when it finishes
         slots=set(EXTRA_GROUPS[self.camera_group]["slots"]) if self.camera_group!="d405" else set()
         slots|={key.rsplit("_",1)[0] for key,var in self.selections.items()
                 if var.get() and key.rsplit("_",1)[0] not in CAMERA_KEYS}
@@ -995,6 +1021,15 @@ class Viewer(tk.Tk):
         frames=self.hub.frames()
         live_count=sum(bool(frames.get(f"{key}_color") and frames[f"{key}_color"].live) for key in CAMERA_KEYS)
         busy,recording=self.recorder.busy,self.recorder.recording
+        # Recording always runs at full camera settings; while it does, the preview only redraws once
+        # a second (webcams also decode their preview once a second) so it never competes with capture.
+        if busy != self.preview_reduced:
+            self.preview_reduced = busy
+            self.extras.set_preview_fps(RECORDING_PREVIEW_FPS if busy else PREVIEW_FPS)
+            self.hub.set_preview_fps(RECORDING_PREVIEW_FPS if busy else PREVIEW_FPS)
+        draw_previews = not busy or time.monotonic()-self.last_preview_draw >= 1/RECORDING_PREVIEW_FPS
+        if draw_previews:
+            self.last_preview_draw = time.monotonic()
         recorded_webcams=self.recorded_webcams() if recording else set()
         self.top_status.configure(text=f"●  REC · {len(self.recorder.tracks)+len(recorded_webcams)}개 영상" if recording else f"●  D405 {live_count}/3 연결",
                                   fg=RED if recording else ACCENT if live_count else MUTED)
@@ -1038,17 +1073,17 @@ class Viewer(tk.Tk):
         measurements = {}
         distances = {}
         for camera_key, raw in packets.items():
-            mm = distance_mm(raw.depth, raw.scale, *self.points[camera_key]) if raw else None
+            mm = distance_mm(raw.depth, raw.scale, *self.point(camera_key, raw)) if raw else None
             distances[camera_key] = mm
             measurements[camera_key] = f"{mm:,.1f} mm" if mm is not None else "측정 불가"
         mm = distances[self.selected_camera]
         self.depth_distance.configure(text=f"{mm:,.1f} mm" if mm is not None else "— mm")
-        self.depth_details.configure(text=f"{CAMERA_NAMES[self.selected_camera]} 픽셀 {self.points[self.selected_camera]} · 5×5 중앙값")
+        self.depth_details.configure(text=f"{CAMERA_NAMES[self.selected_camera]} 픽셀 {self.point(self.selected_camera, packets.get(self.selected_camera))} · 5×5 중앙값")
         extra_frames = self.extras.frames() if self.camera_group != "d405" else {}
         for key,panel in self.panels.items():
             camera_key = key.rsplit("_", 1)[0]
             if camera_key not in CAMERA_KEYS:
-                if self.camera_group != "d405" and key in EXTRA_GROUPS[self.camera_group]["streams"]:
+                if draw_previews and self.camera_group != "d405" and key in EXTRA_GROUPS[self.camera_group]["streams"]:
                     panel.render(extra_frames.get(key), None, "", recording and (
                         key in self.recorder.tracks or key.rsplit("_",1)[0] in recorded_webcams),
                         self.extra_overlay(key, extra_frames.get(key)))
@@ -1057,9 +1092,13 @@ class Viewer(tk.Tk):
             if self.show_calibration.get() and self.calibration and key.endswith("_color"):
                 info = self.hub.cameras()[camera_key].snapshot()[1]
                 calibrated_camera = self.calibration["cameras"].get(camera_key)
-                if calibrated_camera and info.get("serial") == calibrated_camera["serial"]:
-                    overlay = (calibrated_camera, info["color_intrinsics"])
-            panel.render(frames.get(key),self.points[camera_key],measurements[camera_key],recording and key in self.recorder.tracks, overlay)
+                frame = frames.get(key)
+                if calibrated_camera and frame and info.get("serial") == calibrated_camera["serial"]:
+                    # previews are downscaled: project with intrinsics scaled to the shown image
+                    overlay = (calibrated_camera, scaled(info["color_intrinsics"], (frame.image.shape[1], frame.image.shape[0])))
+            if draw_previews:
+                panel.render(frames.get(key),self.point(camera_key, packets.get(camera_key)),measurements[camera_key],
+                             recording and key in self.recorder.tracks, overlay)
         if self.camera_group == "d405":
             self.summary.configure(text="  ·  ".join(f"{CAMERA_NAMES[key]} 선택 깊이 {measurements[key]}" for key in CAMERA_KEYS))
         else:
@@ -1090,7 +1129,7 @@ class Viewer(tk.Tk):
                 return None
         info = device.snapshot()[1]
         if info.get("serial") == camera.get("serial") and info.get("color_intrinsics"):
-            return camera, info["color_intrinsics"]
+            return camera, scaled(info["color_intrinsics"], (frame.image.shape[1], frame.image.shape[0]))
         return None
 
     def extra_summary(self, frames):
