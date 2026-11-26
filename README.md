@@ -167,6 +167,28 @@ D405 다음에 D435와 웹캠을 한 대씩 열어 같은 정지 보드를 16장
 - **PLY 저장**은 표시 중인 카메라를 합쳐 보드 좌표계로 내보냅니다.
 - Space는 재생, ←/→는 한 프레임 이동입니다. 마우스 왼쪽 드래그로 회전, 가운데 드래그로 이동, 휠로 확대합니다.
 
+## 시뮬레이션 (MuJoCo real2sim)
+
+`robohand/sim/`은 수술 기구, 봉합 패드, 로봇 손을 MuJoCo로 구성합니다. 기본 손은 연구 표준인 **Shadow Hand**이며, Tesollo DG-5F-M으로 바꿀 수도 있습니다. 캡처 도구와 별개이고 macOS에서도 실행됩니다.
+
+```bash
+pip install -r requirements-sim.txt
+python -m robohand.sim.scene --render workspace.png --xml workspace.xml               # Shadow Hand
+python -m robohand.sim.scene --hand dg5f --render workspace.png                       # DG-5F-M
+```
+
+- **좌표계:** 월드 좌표계는 보정 보드 좌표계와 같습니다(X 열 방향, Y 행 반대, Z 위, m). 카메라로 복원한 포즈를 변환 없이 넣을 수 있습니다.
+- **로봇 손 모델:** 처음 실행할 때 고정 커밋에서 `DATA_ROOT/sim_assets/`로 한 번 내려받습니다.
+  - **Shadow Hand** (`shadow.py`): [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie)의 E3M5 모델(Apache-2.0)을 씁니다. 관절 24개, 구동기 20개입니다. 손가락 단면이 14–18 mm라 니들홀더 링(27 × 21 mm)에 가운데 마디까지 들어갑니다.
+  - **DG-5F-M** (`dg5f.py`): [tesollo_model](https://github.com/tesollodelto/tesollo_model)(BSD-3)을 씁니다. 원본에 구동기가 없어서 위치 구동기를 추가합니다. 손가락이 22.4 × 19 mm라 링에 끼우려면 어댑터가 필요합니다.
+- **손 움직이기:** 손 루트는 자유 관절(`hand_free`)이며, mocap body `hand_target`에 weld로 붙어 있습니다. 타깃의 위치·자세를 바꾸면 손목이 따라가고, `ctrl`로 손가락을 움직입니다. 두 손 모두 루트 좌표계에서 손가락이 +z, 손바닥이 +x, 엄지가 +y를 향합니다.
+- **니들홀더** (`needle_holder.py`)
+  - 두 반쪽이 박스락 힌지(`boxlock`, 0 = 닫힘)로 연결되어 있습니다.
+  - 링은 캡슐을 이어 만들었습니다. MuJoCo 충돌 메시는 볼록체여야 하기 때문입니다.
+  - 래칫은 관절 equality 제약이며 `Ratchet.try_lock` / `release`로 켜고 끕니다.
+  - 치수는 `tool_images/`의 줄자 사진에서 읽었습니다. "not measured"라고 표시된 값은 캘리퍼로 재서 `NeedleHolderSpec`에 넣으세요.
+- **패드:** 아직 강체 상자입니다.
+
 ## 명령줄
 
 ```powershell
@@ -189,6 +211,7 @@ robohand/
 ├─ replay/                    # reconstruction.py(깊이→포인트클라우드), player.py(Depth Replay 3D)
 ├─ devices/                   # manus.py(MANUS SDK), vive.py(libsurvive 수집기), jsonl.py
 ├─ ui/                        # studio.py(Camera Studio), widgets.py, theme.py
+├─ sim/                       # scene.py, needle_holder.py, shadow.py, dg5f.py, assets.py (MuJoCo real2sim)
 └─ tools/verify_system.py
 tracker_studio/               # VIVE 웹 UI, survive_worker.py, 미리 빌드한 libsurvive
 ```
