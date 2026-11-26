@@ -189,6 +189,34 @@ python -m robohand.sim.scene --hand dg5f --render workspace.png                 
   - 치수는 `tool_images/`의 줄자 사진에서 읽었습니다. "not measured"라고 표시된 값은 캘리퍼로 재서 `NeedleHolderSpec`에 넣으세요.
 - **패드:** 아직 강체 상자입니다.
 
+## 다시점 손 복원 (robohand.recon)
+
+`robohand/recon/`은 녹화 세션의 RGB 영상만으로 양손 21개 키포인트를 보드 좌표계(m)에 3D로 복원합니다. 깊이는 검증에만 씁니다. 캡처 도구와 별개이며, macOS·Linux·Windows의 CPU에서 돌고 GPU가 있으면 더 빠릅니다.
+
+```bash
+pip install -r requirements-recon.txt
+S=data/recordings/04_incision_suturing/<세션>
+python -m robohand.recon.hands2d  $S                                # 1. 카메라별 2D 손 키포인트 (RTMW 전신 + RTMPose 손 크롭)
+python -m robohand.recon.hands3d  $S --out hands3d_pass1.npz        # 2. 시간 맞춤 + 강건 삼각측량 + 평활 + 골격 피팅
+python -m robohand.recon.guided   $S --result hands3d_pass1.npz     # 3. 3D 손을 투영한 크롭에서 손 모델 재실행
+python -m robohand.recon.hands3d  $S                                # 4. 세 2D 출처 중 카메라별로 골라 다시 복원 -> hands3d.npz
+python -m robohand.recon.validate $S --result hands3d_pass1.npz hands3d.npz   # RealSense 깊이로 검증
+python -m robohand.recon.overlay  $S --times 12 30                  # 8개 뷰 재투영 확인 (JPEG), --video 는 전체 MP4
+```
+
+- **카메라:** `calibration.json`의 외부 보정을 그대로 씁니다. 내부 파라미터는 RealSense는 녹화 스트림 값(`session.json`, D435는 1080p), 웹캠은 렌즈 보정 값입니다. d405_2는 제외합니다(USB 2, 15 fps, 프레임 절반 반복).
+- **시간:** RealSense는 프레임 도착 시각을, 웹캠은 장치 시각을 호스트 시계로 옮긴 값을 씁니다. 2D 키포인트를 각 카메라 프레임 사이에서 보간해 공통 30 Hz 시간축에 맞춥니다. 카메라별 고정 지연은 그 카메라를 빼고 복원한 3D에 가장 잘 맞는 값으로 추정합니다(d435_1 = 0).
+- **삼각측량:** 관절마다 뷰 쌍 RANSAC(MSAC)으로 일관된 뷰만 남깁니다. 오차는 픽셀이 아니라 관절 깊이에서 관측 광선까지의 거리(기본 12 mm)로 재서, 근접 D405와 원거리 4K 웹캠을 같은 기준으로 봅니다.
+- **평활과 골격:** 6 Hz Whittaker 평활 뒤, 15 mm 넘게 벗어난 관측을 버리고 다시 평활합니다. 그다음 피험자별 뼈 길이와 손바닥 형태를 중앙값으로 정하고 프레임마다 맞춥니다(손바닥 강체, PIP/DIP는 경첩). 결과는 `fitted`입니다.
+- **출력 `recon/hands3d.npz`:** `times` (T), `joints`·`fitted` (T, 2, 21, 3; 손 0 = 왼손, 1 = 오른손), `valid`, `views`(관절별 채택 뷰 수), `error`(광선 거리, m), `palm_rotation`·`palm_origin`(손바닥 좌표계: y는 중지 MCP 방향, z는 손등 방향), `bone_lengths`, `offsets`(카메라별 지연, s), `cameras`, `sources`.
+- **속도:** M5 Mac CPU에서 8대 × 38초 테이크 기준입니다. 1단계가 약 40분, 3단계가 약 6분이고, 나머지는 1분 안팎입니다.
+- **현재 정확도 (04_incision_suturing 테이크 하나, 깊이 검증):**
+  - 손가락 관절과 손끝은 RealSense 4대를 합친 손 표면에서 중앙값 3–5 mm, p90 9–17 mm 떨어져 있습니다.
+  - 표면에서 20 mm 넘게 벗어난 관절은 0–5%입니다. 손목은 손목 두께 때문에 15–20 mm입니다.
+  - 각 카메라의 2D 키포인트는 나머지 카메라로 복원한 3D와 중앙값 7–14 mm 차이가 납니다. 지금 정확도를 정하는 것은 2D 모델입니다.
+  - 3단계(크롭 추적)는 정확도를 거의 바꾸지 않고 손 모델만 돌리므로 빠릅니다.
+  - `fitted`는 뼈 길이를 고정하지만, 손끝이 표면 밖으로 나가는 비율이 늘어 아직 튜닝 중입니다. 지금은 `joints`를 쓰세요.
+
 ## 명령줄
 
 ```powershell
@@ -212,6 +240,7 @@ robohand/
 ├─ devices/                   # manus.py(MANUS SDK), vive.py(libsurvive 수집기), jsonl.py
 ├─ ui/                        # studio.py(Camera Studio), widgets.py, theme.py
 ├─ sim/                       # scene.py, needle_holder.py, shadow.py, dg5f.py, assets.py (MuJoCo real2sim)
+├─ recon/                     # session.py, hands2d.py, guided.py, triangulate.py, hands3d.py, skeleton.py, validate.py, overlay.py (다시점 손 복원)
 └─ tools/verify_system.py
 tracker_studio/               # VIVE 웹 UI, survive_worker.py, 미리 빌드한 libsurvive
 ```

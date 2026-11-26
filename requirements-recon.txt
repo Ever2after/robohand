@@ -1,0 +1,7 @@
+# robohand.recon (offline multi-view hand reconstruction). Runs on macOS / Linux / Windows CPU.
+numpy>=2.0
+scipy>=1.13
+opencv-python>=4.10
+av>=14.0
+onnxruntime>=1.20
+rtmlib==0.0.16
