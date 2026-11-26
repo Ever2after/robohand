@@ -38,6 +38,7 @@ def crop_box(session: Session, camera, margin=0.05):
 
 
 def draw_hand(image, points, ok, color, thickness):
+    ok = ok & np.isfinite(points).all(-1)
     for a, b in BONES:
         if ok[a] and ok[b]:
             cv2.line(image, tuple(np.int32(points[a])), tuple(np.int32(points[b])), color, thickness, cv2.LINE_AA)
