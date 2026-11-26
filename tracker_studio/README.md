@@ -3,6 +3,7 @@
 Windows에서 VIVE Tracker 3.0과 Lighthouse 2.0의 위치·회전을 libsurvive로 수집하는 로컬 웹 인터페이스입니다. SteamVR은 필요하지 않습니다.
 Camera Studio도 같은 수집기(`survive_worker.py`)를 사용해 트래커를 녹화합니다.
 이 화면은 **페어링**, **베이스스테이션 보정**, 트래커 단독 기록에 사용합니다.
+저장소 개요는 [루트 README](../README.md)에, 카메라 녹화는 [robohand](../robohand/README.md)에 있습니다.
 
 ## 실행
 
@@ -45,3 +46,28 @@ USB 동글을 다시 꽂았거나 장치 전원을 껐다 켰다면 **장치 다
 - `web/`: Three.js 3D 화면
 - `vendor/libsurvive/`: 미리 빌드한 Windows용 libsurvive와 패치 파일([README](vendor/libsurvive/README.md))
 - `build-info.json`: libsurvive 소스 커밋과 Windows 호환성 수정 내역
+
+## Camera Studio와 함께 쓰기
+
+트래커 장치는 한 프로세스만 열 수 있습니다. 페어링이나 베이스스테이션 보정을 할 때는 먼저 Camera Studio 사이드바의 **트래커** 줄을 클릭해 연결을 해제하세요. 그런 다음 Tracker Studio에서 작업합니다.
+
+Camera Studio로 녹화하면 세션 폴더에 `vive.jsonl`이 생깁니다.
+- 트래커 포즈(위치 m, 쿼터니언 wxyz)와 광학/관성 상태가 약 250 Hz로 들어 있습니다.
+- `t_host_s`는 카메라와 같은 PC monotonic 시계이고, `pose_time_s`는 libsurvive 원본 시계입니다.
+- 지금은 대시보드에서 숨겨져 있습니다. `robohand/ui/studio.py`의 `GLOVE_TRACKER_UI = True`로 되돌립니다.
+
+```python
+from robohand.devices.vive import load_vive
+trackers = load_vive("data/recordings/<세션>")   # trackers["trackers"]["T20"]["position"] -> (N, 3)
+```
+
+## 알려진 한계
+
+- VIVE 좌표(Lighthouse)와 카메라 보드 좌표계 사이의 정렬, 트래커와 손목 사이의 정렬은 아직 구현하지 않았습니다.
+- 트래커와 카메라는 하드웨어 동기화가 아니라 PC 시계 기준입니다.
+
+## 서드파티
+
+- [libsurvive](https://github.com/collabora/libsurvive) (MIT): 수정한 Windows 빌드를 포함합니다. [빌드 안내](vendor/libsurvive/README.md)
+- llvm-mingw 런타임 `libc++.dll`, `libunwind.dll` (Apache-2.0 WITH LLVM-exception)
+- [three.js](https://github.com/mrdoob/three.js) (MIT), [Inter](https://github.com/rsms/inter) 글꼴 (SIL OFL 1.1)
