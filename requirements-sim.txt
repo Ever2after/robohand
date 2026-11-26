@@ -1,0 +1,4 @@
+# robohand.sim (MuJoCo real2sim). Independent of the Windows capture stack; runs on macOS too.
+mujoco==4.0.1
+numpy>=2.0
+Pillow>=11.0
