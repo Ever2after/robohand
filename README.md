@@ -209,6 +209,7 @@ python -m robohand.recon.overlay  $S --times 12 30                  # 8개 뷰 �
 - **삼각측량:** 관절마다 뷰 쌍 RANSAC(MSAC)으로 일관된 뷰만 남깁니다. 오차는 픽셀이 아니라 관절 깊이에서 관측 광선까지의 거리(기본 12 mm)로 재서, 근접 D405와 원거리 4K 웹캠을 같은 기준으로 봅니다.
 - **평활과 골격:** 6 Hz Whittaker 평활 뒤, 15 mm 넘게 벗어난 관측을 버리고 다시 평활합니다. 그다음 피험자별 뼈 길이와 손바닥 형태를 중앙값으로 정하고 프레임마다 맞춥니다(손바닥 강체, PIP/DIP는 경첩). 결과는 `fitted`입니다.
 - **출력 `recon/hands3d.npz`:** `times` (T), `joints`·`fitted` (T, 2, 21, 3; 손 0 = 왼손, 1 = 오른손), `valid`, `views`(관절별 채택 뷰 수), `error`(광선 거리, m), `palm_rotation`·`palm_origin`(손바닥 좌표계: y는 중지 MCP 방향, z는 손등 방향), `bone_lengths`, `offsets`(카메라별 지연, s), `cameras`, `sources`.
+- **GPU:** `onnxruntime-gpu`를 설치하고 `hands2d`·`guided`에 `--device cuda`를 줍니다(작업자 수는 `--workers`).
 - **속도:** M5 Mac CPU에서 8대 × 38초 테이크 기준입니다. 1단계가 약 40분, 3단계가 약 6분이고, 나머지는 1분 안팎입니다.
 - **현재 정확도 (04_incision_suturing 테이크 하나, 깊이 검증):**
   - 손가락 관절과 손끝은 RealSense 4대를 합친 손 표면에서 중앙값 3–5 mm, p90 9–17 mm 떨어져 있습니다.

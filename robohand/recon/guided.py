@@ -47,7 +47,7 @@ def crop(uv: np.ndarray, ok: np.ndarray, width: int, height: int, min_size: floa
     return [*(center - size / 2), *(center + size / 2)]
 
 
-def run_camera(folder: str, name: str, result_file: str, threads: int) -> str:
+def run_camera(folder: str, name: str, result_file: str, threads: int, device: str = "cpu") -> str:
     session = Session(folder)
     camera = session.cameras[name]
     result = dict(np.load(session.recon / result_file))
@@ -55,11 +55,11 @@ def run_camera(folder: str, name: str, result_file: str, threads: int) -> str:
     offset = float(result["offsets"][names.index(name)]) if name in names else 0.0
     path = session.recon / f"hands2d_{name}.npz"
     data = dict(np.load(path))
-    if threads:
+    if threads and device == "cpu":
         _limit_threads(threads)
     from rtmlib import RTMPose
 
-    model = RTMPose(HAND5, model_input_size=(256, 256), backend="onnxruntime", device="cpu")
+    model = RTMPose(HAND5, model_input_size=(256, 256), backend="onnxruntime", device=device)
     prior, valid = joints_at(result, camera.times - offset)
     n = len(camera.frames)
     guided = np.zeros((n, 2, 21, 3), np.float32)
@@ -95,11 +95,12 @@ def main():
     parser.add_argument("--cameras", nargs="*")
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--threads", type=int, default=3)
+    parser.add_argument("--device", default="cpu", help="cpu or cuda (needs onnxruntime-gpu)")
     args = parser.parse_args()
     folder = str(Path(args.session).resolve())
     names = args.cameras or [n for n in Session(folder).cameras
                              if (Path(folder) / "recon" / f"hands2d_{n}.npz").exists()]
-    jobs = [(folder, name, args.result, args.threads) for name in names]
+    jobs = [(folder, name, args.result, args.threads, args.device) for name in names]
     with mp.get_context("spawn").Pool(max(1, args.workers)) as pool:
         for message in pool.imap_unordered(_job, jobs):
             print(message, flush=True)

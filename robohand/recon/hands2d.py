@@ -49,14 +49,14 @@ def _limit_threads(threads: int):
 
 
 class Detector:
-    def __init__(self, threads: int = 0):
-        if threads:
+    def __init__(self, threads: int = 0, device: str = "cpu"):
+        if threads and device == "cpu":
             _limit_threads(threads)
         from rtmlib import YOLOX, RTMPose
 
-        self.person = YOLOX(PERSON, model_input_size=(640, 640), backend="onnxruntime", device="cpu")
-        self.wholebody = RTMPose(WHOLEBODY, model_input_size=(288, 384), backend="onnxruntime", device="cpu")
-        self.hand = RTMPose(HAND5, model_input_size=(256, 256), backend="onnxruntime", device="cpu")
+        self.person = YOLOX(PERSON, model_input_size=(640, 640), backend="onnxruntime", device=device)
+        self.wholebody = RTMPose(WHOLEBODY, model_input_size=(288, 384), backend="onnxruntime", device=device)
+        self.hand = RTMPose(HAND5, model_input_size=(256, 256), backend="onnxruntime", device=device)
 
     def people(self, image):
         return np.asarray(self.person(image), float).reshape(-1, 4)
@@ -106,13 +106,13 @@ def choose_operator(poses: np.ndarray, roi: np.ndarray) -> int:
     return choice
 
 
-def run_camera(folder: str, name: str, threads: int, force: bool = False) -> str:
+def run_camera(folder: str, name: str, threads: int, force: bool = False, device: str = "cpu") -> str:
     session = Session(folder)
     camera = session.cameras[name]
     out = session.recon / f"hands2d_{name}.npz"
     if out.exists() and not force:
         return f"{name}: exists"
-    detector = Detector(threads)
+    detector = Detector(threads, device)
     box = camera.project(session.workspace_box())
     roi = np.array([*box.min(0), *box.max(0)])
     wanted = {int(f): i for i, f in enumerate(camera.frames)}
@@ -157,9 +157,10 @@ def main():
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--threads", type=int, default=3, help="ONNX Runtime threads per worker")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--device", default="cpu", help="cpu or cuda (needs onnxruntime-gpu)")
     args = parser.parse_args()
     names = args.cameras or list(Session(args.session).cameras)
-    jobs = [(str(Path(args.session).resolve()), name, args.threads, args.force) for name in names]
+    jobs = [(str(Path(args.session).resolve()), name, args.threads, args.force, args.device) for name in names]
     if args.workers <= 1:
         for job in jobs:
             print(_job(job), flush=True)
