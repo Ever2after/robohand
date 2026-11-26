@@ -21,7 +21,8 @@ STAINLESS_DENSITY = 7900.0   # kg/m^3
 
 @dataclass(frozen=True)
 class NeedleHolderSpec:
-    """Dimensions in millimetres, read from tool_images/IMG_4630 (tape measure in frame).
+    """Dimensions in millimetres, read from IMG_4630 (tape measure in frame) in the
+    Hugging Face dataset Ever2after/robohand-data, folder tool_images/.
 
     The photo is not perfectly square to the table, so lengths carry about +-3 % error.
     Fields marked "not measured" are typical values for an 18 cm Mayo-Hegar and must be

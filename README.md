@@ -186,7 +186,7 @@ python -m robohand.sim.scene --hand dg5f --render workspace.png                 
   - 두 반쪽이 박스락 힌지(`boxlock`, 0 = 닫힘)로 연결되어 있습니다.
   - 링은 캡슐을 이어 만들었습니다. MuJoCo 충돌 메시는 볼록체여야 하기 때문입니다.
   - 래칫은 관절 equality 제약이며 `Ratchet.try_lock` / `release`로 켜고 끕니다.
-  - 치수는 `tool_images/`의 줄자 사진에서 읽었습니다. "not measured"라고 표시된 값은 캘리퍼로 재서 `NeedleHolderSpec`에 넣으세요.
+  - 치수는 [데이터셋](https://huggingface.co/datasets/Ever2after/robohand-data/tree/main/tool_images) `tool_images/`의 줄자 사진(IMG_4627–4631)에서 읽었습니다. "not measured"라고 표시된 값은 캘리퍼로 재서 `NeedleHolderSpec`에 넣으세요.
 - **패드:** 아직 강체 상자입니다.
 
 ## 다시점 손 복원 (robohand.recon)

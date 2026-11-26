@@ -29,7 +29,7 @@ HOME = {"shadow": (-0.42, 0.075, 0.13), "dg5f": (-0.16, 0.075, 0.13)}   # root p
 
 @dataclass(frozen=True)
 class PadSpec:
-    """Silicone suture pad in its clear tray (tool_images/IMG_4627, 4628), millimetres."""
+    """Silicone suture pad in its clear tray (dataset tool_images/IMG_4627, 4628), millimetres."""
     length: float = 154.0
     width: float = 81.0
     thickness: float = 10.0        # not measured
